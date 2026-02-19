@@ -1,0 +1,31 @@
+{
+    "partitions": [
+        {
+            "name": "partition_1",
+            "image": "",
+            "partition_2": 8001,
+            "egress": 20
+        },
+        {
+            "name": "partition_2",
+            "image": "",
+            "port": 8001,
+            "partition_3": 8002,
+            "egress": 10,
+            "ingress": 20 
+        },
+        {
+            "name": "partition_3",
+            "image": "",
+            "port": 8002,
+            "partition_4": 8003  
+        },
+        {
+            "name": "partition_4",
+            "image": "",
+            "port": 8003 
+        }
+    ],
+    "simulation": "gpu",
+    "nodePlacement": "exclusive"
+}

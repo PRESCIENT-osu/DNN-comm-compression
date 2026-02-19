@@ -1,0 +1,112 @@
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: partition_1
+  annotations:
+    kubernetes.io/egress-bandwidth: "20M"
+spec:
+  containers:
+  - name: partition_1
+    image: 
+    ports:
+    - partition_2_PORT: 8001
+  resources:
+    requests:
+      limits:
+          nvidia.com/gpu: 1
+  affinity:
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+      - labelSelector:
+          matchExpressions:
+          - key: app.kubernetes.io/name
+            operator: In
+            values:
+            - partition_2
+            - partition_3
+            - partition_4        
+        topologyKey: kubernetes.io/hostname
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  annotations:
+    kubernetes.io/egress-bandwidth: "10M"
+    kubernetes.io/ingress-bandwidth: "20M"
+  name: partition_2
+spec:
+  containers:
+  - name: partition_2
+    image: 
+    ports:
+    - containerPort: 8001
+    - partition_3_PORT: 8002
+  resources:
+    limits:
+          nvidia.com/gpu: 1
+  affinity:
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+      - labelSelector:
+          matchExpressions:
+          - key: app.kubernetes.io/name
+            operator: In
+            values:
+            - partition_1
+            - partition_3
+            - partition_4        
+        topologyKey: kubernetes.io/hostname
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: partition_3
+spec:
+  containers:
+  - name: partition_3
+    image: 
+    ports:
+    - containerPort: 8002
+    - partition_3_PORT: 8003
+  resources:
+    limits:
+          nvidia.com/gpu: 1
+  affinity:
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+      - labelSelector:
+          matchExpressions:
+          - key: app.kubernetes.io/name
+            operator: In
+            values:
+            - partition_1
+            - partition_2
+            - partition_4        
+        topologyKey: kubernetes.io/hostname
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: partition_4
+spec:
+  containers:
+  - name: partition_4
+    image: 
+    ports:
+    - containerPort: 8003
+  resources:
+    limits:
+          nvidia.com/gpu: 1
+  affinity:
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+      - labelSelector:
+          matchExpressions:
+          - key: app.kubernetes.io/name
+            operator: In
+            values:
+            - partition_1
+            - partition_2
+            - partition_3        
+        topologyKey: kubernetes.io/hostname
