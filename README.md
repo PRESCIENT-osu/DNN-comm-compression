@@ -14,12 +14,6 @@ A research framework for distributed DNN inference with communication compressio
 
 ## Setup
 
-Install [pyenv](https://github.com/pyenv/pyenv) and the required Python version:
-
-```bash
-pyenv install 3.11.9
-```
-
 Install dependencies:
 
 ```bash
