@@ -1,0 +1,52 @@
+experiment:
+  name: resnet56_topk_sweep_product
+  model: resnet56
+  baselines:
+    - resnet56_single_node_baseline
+    - resnet56_distributed_baseline
+
+  nodes:
+    - name: A
+      host: node-a
+      port: 8000
+      partitions: [p1]
+    - name: B
+      host: node-b
+      port: 8001
+      partitions: [p2, p3]
+    - name: C
+      host: node-c
+      port: 8002
+      partitions: [p4, p5]
+
+  links:
+    - from: A
+      to: B
+      compression: topk
+      rate: 0.3
+    - from: B
+      to: C
+      compression: topk
+      rate: 0.3
+
+  sweep_mode: product
+  sweep:
+    - links:
+        - from: A
+          to: B
+          compression: topk
+          rates: [0.1, 0.25, 0.5, 0.75, 1.0]
+        - from: B
+          to: C
+          compression: topk
+          rates: [0.1, 0.25, 0.5, 0.75, 1.0]
+
+  dataset:
+    name: cifar10
+    path: .datasets/cifar10
+    batch_size: 100
+    max_in_flight: 10
+
+  metrics_server:
+    host: metrics
+    port: 9100

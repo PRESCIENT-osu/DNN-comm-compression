@@ -1,0 +1,23 @@
+experiment:
+  name: resnet56_single_node_baseline
+  model: resnet56
+  baseline: single_node
+
+  nodes:
+    - name: A
+      host: node-a
+      port: 8000
+      partitions: [p1, p2, p3, p4, p5]
+
+  links: []
+  sweep: []
+
+  dataset:
+    name: cifar10
+    path: .datasets/cifar10
+    batch_size: 100
+    max_in_flight: 10
+
+  metrics_server:
+    host: metrics
+    port: 9100

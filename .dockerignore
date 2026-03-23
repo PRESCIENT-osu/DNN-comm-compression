@@ -1,0 +1,14 @@
+.git
+.venv
+.python-version
+__pycache__
+*.pyc
+*.pyo
+archive/
+experiments/
+docs/
+*.md
+*.yaml
+*.yml
+.DS_Store
+.ruff_cache

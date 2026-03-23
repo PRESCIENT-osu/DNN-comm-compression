@@ -1,0 +1,24 @@
+name: llama_single_node_baseline_wikitext
+model: llama-3.1-8b
+baseline: single_node
+
+nodes:
+  - name: single
+    host: llama-single
+    port: 8000
+    partitions: [p1, p2, p3]
+
+links: []
+sweep: []
+
+dataset:
+  name: wikitext2
+  path: /partitions/tokenizer
+  tokenizer_path: /partitions/tokenizer
+  batch_size: 2
+  max_in_flight: 2
+  max_seq_len: 512
+
+metrics_server:
+  host: metrics
+  port: 9100

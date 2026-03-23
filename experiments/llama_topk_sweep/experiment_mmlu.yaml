@@ -1,0 +1,65 @@
+name: llama_topk_mmlu
+model: llama-3.1-8b
+baselines:
+  - llama_single_node_baseline_mmlu
+  - llama_distributed_baseline_mmlu
+
+nodes:
+  - name: early
+    host: llama-early
+    port: 8000
+    partitions: [p1]
+  - name: middle
+    host: llama-middle
+    port: 8001
+    partitions: [p2]
+  - name: late
+    host: llama-late
+    port: 8002
+    partitions: [p3]
+
+links:
+  - from: early
+    to: middle
+    compression: none
+  - from: middle
+    to: late
+    compression: none
+
+sweep_mode: paired
+sweep:
+  - links:
+      - from: early
+        to: middle
+        compression: none
+      - from: middle
+        to: late
+        compression: none
+  - links:
+      - from: early
+        to: middle
+        compression: topk
+        rates: [0.1, 0.3, 0.5, 0.7]
+      - from: middle
+        to: late
+        compression: topk
+        rates: [0.1, 0.3, 0.5, 0.7]
+
+dataset:
+  name: mmlu
+  path: /partitions/tokenizer
+  tokenizer_path: /partitions/tokenizer
+  batch_size: 4
+  max_in_flight: 4
+  subjects:
+    - college_computer_science
+    - high_school_mathematics
+    - professional_law
+    - global_facts
+    - miscellaneous
+    - business_ethics
+  samples_per_subject: 50
+
+metrics_server:
+  host: metrics
+  port: 9100
