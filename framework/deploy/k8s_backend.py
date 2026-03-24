@@ -48,7 +48,7 @@ def generate(
 
     docs.append(_configmap(exp, experiment_config_path, namespace))
     docs.append(_metrics_pod(exp, infra, image, metrics_data_dir, namespace))
-    docs.append(_metrics_service(exp, namespace))
+    docs.append(_metrics_service(exp, infra, namespace))
 
     outgoing_bw: dict[str, float] = {}
     for link in infra.links:
@@ -65,12 +65,11 @@ def generate(
                 exp=exp,
                 image=image,
                 partitions_dir=partitions_dir,
-                dataset_dir=dataset_dir,
                 namespace=namespace,
                 egress_bandwidth_mbps=bw,
             )
         )
-        docs.append(_node_service(node, namespace))
+        docs.append(_node_service(node, infra_node, namespace))
 
     return "---\n".join(
         yaml.dump(doc, default_flow_style=False, sort_keys=False) for doc in docs
@@ -148,20 +147,25 @@ def _metrics_pod(
     }
 
 
-def _metrics_service(exp: ExperimentConfig, namespace: str) -> dict[str, Any]:
+def _metrics_service(
+    exp: ExperimentConfig, infra: InfraConfig, namespace: str
+) -> dict[str, Any]:
+    port_spec: dict[str, Any] = {
+        "port": exp.metrics_server.port,
+        "targetPort": exp.metrics_server.port,
+    }
+    spec: dict[str, Any] = {
+        "selector": {"app": "metrics-server"},
+        "ports": [port_spec],
+    }
+    if infra.metrics_node_port is not None:
+        spec["type"] = "NodePort"
+        port_spec["nodePort"] = infra.metrics_node_port
     return {
         "apiVersion": "v1",
         "kind": "Service",
         "metadata": {"name": exp.metrics_server.host, "namespace": namespace},
-        "spec": {
-            "selector": {"app": "metrics-server"},
-            "ports": [
-                {
-                    "port": exp.metrics_server.port,
-                    "targetPort": exp.metrics_server.port,
-                }
-            ],
-        },
+        "spec": spec,
     }
 
 
@@ -171,7 +175,6 @@ def _node_pod(
     exp: ExperimentConfig,
     image: str,
     partitions_dir: Path,
-    dataset_dir: Path,
     namespace: str,
     egress_bandwidth_mbps: float | None,
 ) -> dict[str, Any]:
@@ -235,11 +238,6 @@ def _node_pod(
                             "readOnly": True,
                         },
                         {
-                            "name": "dataset",
-                            "mountPath": "/app/data",
-                            "readOnly": True,
-                        },
-                        {
                             "name": "experiment-config",
                             "mountPath": "/app/config",
                             "readOnly": True,
@@ -253,10 +251,6 @@ def _node_pod(
                     "hostPath": {"path": str(partitions_dir.resolve())},
                 },
                 {
-                    "name": "dataset",
-                    "hostPath": {"path": str(dataset_dir.resolve())},
-                },
-                {
                     "name": "experiment-config",
                     "configMap": {"name": f"{exp.name}-config"},
                 },
@@ -265,14 +259,22 @@ def _node_pod(
     }
 
 
-def _node_service(node_cfg: Any, namespace: str) -> dict[str, Any]:
+def _node_service(node_cfg: Any, infra_node: Any, namespace: str) -> dict[str, Any]:
     pod_name = f"node-{node_cfg.name.lower()}"
+    port_spec: dict[str, Any] = {
+        "port": node_cfg.port,
+        "targetPort": node_cfg.port,
+    }
+    spec: dict[str, Any] = {
+        "selector": {"app": pod_name},
+        "ports": [port_spec],
+    }
+    if infra_node is not None and infra_node.node_port is not None:
+        spec["type"] = "NodePort"
+        port_spec["nodePort"] = infra_node.node_port
     return {
         "apiVersion": "v1",
         "kind": "Service",
         "metadata": {"name": node_cfg.host, "namespace": namespace},
-        "spec": {
-            "selector": {"app": pod_name},
-            "ports": [{"port": node_cfg.port, "targetPort": node_cfg.port}],
-        },
+        "spec": spec,
     }

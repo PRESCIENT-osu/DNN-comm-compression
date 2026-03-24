@@ -47,8 +47,8 @@ sweep:
 
 dataset:
   name: wikitext2
-  path: /partitions/tokenizer
-  tokenizer_path: /partitions/tokenizer
+  path: models/llama/.partitions/tokenizer
+  tokenizer_path: models/llama/.partitions/tokenizer
   batch_size: 2
   max_in_flight: 2
   max_seq_len: 512

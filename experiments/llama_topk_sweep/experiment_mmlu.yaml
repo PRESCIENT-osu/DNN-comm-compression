@@ -47,8 +47,8 @@ sweep:
 
 dataset:
   name: mmlu
-  path: /partitions/tokenizer
-  tokenizer_path: /partitions/tokenizer
+  path: models/llama/.partitions/tokenizer
+  tokenizer_path: models/llama/.partitions/tokenizer
   batch_size: 4
   max_in_flight: 4
   subjects:

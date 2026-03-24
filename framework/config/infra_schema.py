@@ -20,6 +20,9 @@ class InfraNodeConfig(BaseModel):
 
     name: str
     resources: NodeResources = Field(default_factory=NodeResources)
+    node_port: int | None = (
+        None  # K8s NodePort for this node's service; ignored by Docker
+    )
 
 
 class InfraLinkConfig(BaseModel):
@@ -41,3 +44,6 @@ class InfraConfig(BaseModel):
 
     nodes: list[InfraNodeConfig]
     links: list[InfraLinkConfig] = Field(default_factory=list)
+    metrics_node_port: int | None = (
+        None  # K8s NodePort for the metrics service; ignored by Docker
+    )

@@ -1,15 +1,5 @@
 inherits: ../base/resnet56_infra.yaml
 
-metrics_node_port: 30900
-
-nodes:
-  - name: A
-    node_port: 30800
-  - name: B
-    node_port: 30801
-  - name: C
-    node_port: 30802
-
 links:
   - from: A
     to: B
