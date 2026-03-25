@@ -182,11 +182,14 @@ class MetricsEmitter:
         """Stop the worker and flush remaining events."""
         self._stopped = True
         if self._worker_task:
-            self._worker_task.cancel()
             try:
-                await self._worker_task
-            except asyncio.CancelledError:
-                pass
+                await asyncio.wait_for(self._worker_task, timeout=5.0)
+            except (TimeoutError, asyncio.CancelledError):
+                self._worker_task.cancel()
+                try:
+                    await self._worker_task
+                except asyncio.CancelledError:
+                    pass
         await self._flush_remaining()
         logger.info("Metrics emitter stopped")
 
@@ -199,9 +202,10 @@ class MetricsEmitter:
     async def _collect_batch(self) -> list[BaseEvent]:
         """Collect up to batch_size events within flush_interval_s."""
         batch: list[BaseEvent] = []
-        deadline = asyncio.get_event_loop().time() + self._flush_interval_s
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self._flush_interval_s
         while len(batch) < self._batch_size:
-            remaining = deadline - asyncio.get_event_loop().time()
+            remaining = deadline - loop.time()
             if remaining <= 0:
                 break
             try:
@@ -229,31 +233,30 @@ class MetricsEmitter:
         """Send a batch of events to the metrics server with exponential backoff."""
         payload = [e.model_dump(mode="json") for e in batch]
         delay = 1.0
-        # print(f'Metrics server url: {self._server_url}')
-        for attempt in range(1, self._max_retries + 1):
-            try:
-                async with httpx.AsyncClient(timeout=5.0) as client:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            for attempt in range(1, self._max_retries + 1):
+                try:
                     resp = await client.post(
                         f"{self._server_url}/metrics",
                         json=payload,
                     )
                     resp.raise_for_status()
-                return
-            except Exception as exc:
-                if attempt == self._max_retries:
-                    logger.warning(
-                        "Dropping batch of %d events after %d failed attempts: %s",
-                        len(batch),
-                        self._max_retries,
-                        exc,
-                    )
-                else:
-                    logger.debug(
-                        "Metrics send attempt %d/%d failed, retrying in %.1fs: %s",
-                        attempt,
-                        self._max_retries,
-                        delay,
-                        exc,
-                    )
-                    await asyncio.sleep(delay)
-                    delay *= 2
+                    return
+                except Exception as exc:
+                    if attempt == self._max_retries:
+                        logger.warning(
+                            "Dropping batch of %d events after %d failed attempts: %s",
+                            len(batch),
+                            self._max_retries,
+                            exc,
+                        )
+                    else:
+                        logger.debug(
+                            "Metrics send attempt %d/%d failed, retrying in %.1fs: %s",
+                            attempt,
+                            self._max_retries,
+                            delay,
+                            exc,
+                        )
+                        await asyncio.sleep(delay)
+                        delay *= 2
