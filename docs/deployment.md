@@ -17,7 +17,6 @@ python -m framework.deploy.deploy \
   --experiment experiments/resnet56_topk_sweep \
   --target docker|k8s \
   --partitions-dir models/resnet/.partitions \
-  --dataset-dir /path/to/data \
   [--image dnn-compression:latest] \
   [--metrics-dir metrics_data] \
   [--namespace default] \
@@ -48,16 +47,18 @@ The `tc netem rate` command limits egress at the pod/container level (all outgoi
 cd experiments/resnet56_topk_sweep/deploy
 docker compose up -d
 
-# Or via the deploy tool
+# Or via the deploy tool with --apply
 python -m framework.deploy.deploy --experiment experiments/resnet56_topk_sweep \
-  --target docker --partitions-dir models/resnet/.partitions --dataset-dir /data --apply
+  --target docker --partitions-dir models/resnet/.partitions --apply
 ```
 
-**Orchestrator callback**: the orchestrator runs on the host and nodes must reach its callback server. Pass `--callback-host host.docker.internal` to the runner so nodes can POST results back:
+**Orchestrator**: runs on the host. Use `--node-host localhost` and `--metrics-host localhost` since all services are published to host ports. `--callback-host` must be a host IP reachable from inside the containers (not `127.0.0.1`):
 
 ```bash
 python -m framework.orchestrator.runner experiments/resnet56_topk_sweep \
-  --callback-host host.docker.internal --callback-port 8080
+  --node-host localhost \
+  --metrics-host localhost \
+  --callback-host <your-machine-ip>
 ```
 
 ## Kubernetes (KinD)
@@ -69,25 +70,26 @@ Generates a single `manifests.yaml` containing:
 
 **Bandwidth limits**: applied via Cilium `kubernetes.io/egress-bandwidth` pod annotation. Requires Cilium CNI with bandwidth manager enabled in the KinD cluster.
 
-**Volumes**: partitions and dataset are mounted as `hostPath` volumes — the paths must be accessible to KinD nodes. For paths outside `/tmp`, add `extraMounts` to the KinD cluster config.
+**Volumes**: partitions are mounted as `hostPath` volumes — the paths must be accessible to kind nodes. For paths outside `/tmp`, add `extraMounts` to the kind cluster config. The dataset is not mounted into pods; it is loaded directly by the orchestrator on the host.
+
+**NodePorts**: to expose node and metrics services outside the cluster, set `node_port` per node and `metrics_node_port` in the experiment's `infra.yaml`. If omitted, services are `ClusterIP` only (unreachable from the host orchestrator without `kubectl port-forward`).
 
 **Applying**:
 ```bash
 python -m framework.deploy.deploy --experiment experiments/resnet56_topk_sweep \
-  --target k8s --partitions-dir models/resnet/.partitions --dataset-dir /data --apply
+  --target k8s --partitions-dir /path/to/partitions --apply
 
 # Or manually
 kubectl apply -f experiments/resnet56_topk_sweep/deploy/manifests.yaml
 ```
 
-**Orchestrator against k8s**: the orchestrator runs on the host and needs to reach node services. Use `kubectl port-forward` for each node:
-```bash
-kubectl port-forward svc/node-a 8000:8000 &
-kubectl port-forward svc/node-b 8001:8001 &
-kubectl port-forward svc/node-c 8002:8002 &
+**Orchestrator**: runs on the host and reaches pods via NodePort. Pass the cluster node's IP (e.g. Tailscale IP of the server) and your local machine's IP for the callback:
 
+```bash
 python -m framework.orchestrator.runner experiments/resnet56_topk_sweep \
-  --callback-host <host-ip-reachable-from-pods> --callback-port 8080
+  --node-host <cluster-node-ip> \
+  --metrics-host <cluster-node-ip> \
+  --callback-host <local-machine-ip>
 ```
 
 ## Infra Config Inheritance

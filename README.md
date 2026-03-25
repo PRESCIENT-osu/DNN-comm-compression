@@ -12,6 +12,11 @@ A research framework for distributed DNN inference with communication compressio
 - [Deployment](docs/deployment.md) — Docker Compose and Kubernetes deployment tool
 - [Analysis](docs/analysis.md) — post-processing, plots, and cleanup
 
+### Model Guides
+
+- [ResNet-56](docs/resnet.md) — partitioning, experiment configs, running on Docker and Kubernetes
+- [Llama-3.1-8B](docs/llama.md) — partitioning, experiment configs, running Llama experiments
+
 ## Setup
 
 Install dependencies:
@@ -55,23 +60,18 @@ Validation checks both configs, resolves infra inheritance, expands the sweep, v
 
 ## Running an Experiment
 
+See the model-specific guides for full step-by-step instructions:
+- [ResNet-56 on Docker / Kubernetes](docs/resnet.md)
+- [Llama-3.1-8B](docs/llama.md)
+
+After running, analyze results:
+
 ```bash
-# Deploy infrastructure
-python -m framework.deploy.deploy --experiment experiments/resnet56_topk_sweep --target docker
-
-# Run experiment sweep
-python -m framework.orchestrator.runner --experiment experiments/resnet56_topk_sweep
-
-# Analyze results
 python -m framework.analysis.analyze --experiment resnet56_topk_sweep
 python -m framework.analysis.visualize --experiment resnet56_topk_sweep
 ```
 
 ## Model Partitioning
 
-Partitioning scripts are in `models/` and are independent of the experiment framework. Run them once to produce partition artifacts consumed by node servers.
+Partitioning scripts are in `models/` and are independent of the experiment framework. Run them once to produce partition artifacts consumed by node servers. More info in the model-specific instructions mentioned above.
 
-```bash
-python models/resnet/partition_resnet56.py --verify
-# outputs to models/resnet/.partitions/ (gitignored)
-```
