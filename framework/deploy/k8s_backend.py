@@ -14,7 +14,6 @@ def generate(
     infra: InfraConfig,
     image: str,
     partitions_dir: Path,
-    dataset_dir: Path,
     metrics_data_dir: Path,
     experiment_config_path: Path,
     namespace: str = "default",
@@ -27,16 +26,15 @@ def generate(
       - A metrics server Pod + Service
 
     Bandwidth limits from the infra config are applied via Cilium
-    ``kubernetes.io/egress-bandwidth`` pod annotations.  Partitions and the
-    dataset are mounted from the host via hostPath volumes (suitable for
-    KinD local development).
+    ``kubernetes.io/egress-bandwidth`` pod annotations.  Partitions are
+    mounted from the host via hostPath volumes (suitable for kind local
+    development).
 
     Args:
         exp: Experiment configuration.
         infra: Infrastructure configuration.
         image: Docker image name to use for all pods.
         partitions_dir: Host path to the ``.partitions`` directory.
-        dataset_dir: Host path to the dataset directory.
         metrics_data_dir: Host path for metrics storage.
         experiment_config_path: Host path to the experiment YAML file.
         namespace: Kubernetes namespace to deploy into.

@@ -14,7 +14,6 @@ def generate(
     infra: InfraConfig,
     image: str,
     partitions_dir: Path,
-    dataset_dir: Path,
     metrics_data_dir: Path,
     experiment_config_path: Path,
 ) -> str:
@@ -31,7 +30,6 @@ def generate(
         infra: Infrastructure configuration.
         image: Docker image name to use for all services.
         partitions_dir: Host path to the ``.partitions`` directory.
-        dataset_dir: Host path to the dataset directory.
         metrics_data_dir: Host path for metrics storage.
         experiment_config_path: Host path to the experiment YAML file.
 
@@ -93,7 +91,6 @@ def generate(
             "ports": [f"{node.port}:{node.port}"],
             "volumes": [
                 f"{partitions_dir.resolve()}:/app/.partitions:ro",
-                f"{dataset_dir.resolve()}:/app/data:ro",
                 f"{experiment_config_path.resolve()}:/app/experiment.yaml:ro",
             ],
             "depends_on": ["metrics"],

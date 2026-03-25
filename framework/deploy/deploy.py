@@ -47,12 +47,6 @@ def main() -> None:
         help="Host path to the model .partitions directory",
     )
     parser.add_argument(
-        "--dataset-dir",
-        type=Path,
-        required=True,
-        help="Host path to the dataset directory",
-    )
-    parser.add_argument(
         "--metrics-dir",
         type=Path,
         default=Path("metrics_data"),
@@ -85,7 +79,6 @@ def main() -> None:
             infra=infra,
             image=args.image,
             partitions_dir=args.partitions_dir,
-            dataset_dir=args.dataset_dir,
             metrics_data_dir=args.metrics_dir,
             experiment_config_path=experiment_config_path,
         )
@@ -107,7 +100,6 @@ def main() -> None:
             infra=infra,
             image=args.image,
             partitions_dir=args.partitions_dir,
-            dataset_dir=args.dataset_dir,
             metrics_data_dir=args.metrics_dir,
             experiment_config_path=experiment_config_path,
             namespace=args.namespace,

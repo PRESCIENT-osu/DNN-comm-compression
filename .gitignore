@@ -206,6 +206,7 @@ __marimo__/
 # Experiment outputs
 experiments/*/results/
 experiments/*/deploy/
+experiments/*/plots/
 
 # Model artifacts
 *.th
