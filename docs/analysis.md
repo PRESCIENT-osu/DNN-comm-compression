@@ -4,9 +4,11 @@ Post-processing tools for aggregating metrics, generating plots, and cleaning up
 
 ## Prerequisites
 
-Results must exist before running analysis:
-- `experiments/<name>/results/<run_id>/records.jsonl` — written by the orchestrator after each run
-- `metrics_data/<experiment_id>/<event_type>.ndjson` — written by the metrics server during runs
+Results must exist in the metrics server storage before running analysis:
+
+- `metrics_data/<experiment_id>/result.ndjson` — written by the metrics server as `ResultEvent`s during each run
+
+The orchestrator streams results to the metrics server during the sweep. Analysis reads directly from that file — no separate results directory is needed.
 
 Baselines referenced in the experiment config should also have their results present. If they are missing, analysis prints `N/A` for baseline accuracy columns.
 
@@ -45,39 +47,41 @@ python -m framework.analysis.visualize \
   [--output-dir experiments/resnet56_topk_sweep/plots]
 ```
 
-## Cleanup
-
-Removes per-run result directories older than a threshold. Age is determined by the `records.jsonl` modification time.
-
-```bash
-# Dry run (shows what would be deleted)
-python -m framework.analysis.cleanup \
-  --experiment resnet56_topk_sweep \
-  --older-than 7 \
-  --dry-run
-
-# Delete for real
-python -m framework.analysis.cleanup \
-  --experiment resnet56_topk_sweep \
-  --older-than 7
-```
-
-`metrics_data/` files are not modified by cleanup — they are append-only NDJSON logs managed by the metrics server.
-
 ## Typical Workflow
 
 ```bash
-# 1. Run baselines first
-python -m framework.orchestrator.runner experiments/resnet56_single_node_baseline
-python -m framework.orchestrator.runner experiments/resnet56_distributed_baseline
+# 1. Deploy and run baselines
+python -m framework.deploy.deploy \
+  --experiment experiments/resnet56_single_node_baseline \
+  --target docker \
+  --partitions-dir models/resnet/.partitions \
+  --dataset-dir .datasets/cifar10 \
+  --apply
+
+# Wait for orchestrator to finish, then tear down
+docker compose -f experiments/resnet56_single_node_baseline/deploy/docker-compose.yml down
+
+# Repeat for the distributed baseline
+python -m framework.deploy.deploy \
+  --experiment experiments/resnet56_distributed_baseline \
+  --target docker \
+  --partitions-dir models/resnet/.partitions \
+  --dataset-dir .datasets/cifar10 \
+  --apply
+
+docker compose -f experiments/resnet56_distributed_baseline/deploy/docker-compose.yml down
 
 # 2. Run the sweep experiment
-python -m framework.orchestrator.runner experiments/resnet56_topk_sweep
+python -m framework.deploy.deploy \
+  --experiment experiments/resnet56_topk_sweep \
+  --target docker \
+  --partitions-dir models/resnet/.partitions \
+  --dataset-dir .datasets/cifar10 \
+  --apply
+
+docker compose -f experiments/resnet56_topk_sweep/deploy/docker-compose.yml down
 
 # 3. Analyse results
 python -m framework.analysis.analyze --experiment resnet56_topk_sweep
 python -m framework.analysis.visualize --experiment resnet56_topk_sweep
-
-# 4. Clean up after 7 days
-python -m framework.analysis.cleanup --experiment resnet56_topk_sweep --older-than 7
 ```

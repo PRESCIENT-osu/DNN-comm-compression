@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
 import yaml
 
 from framework.config.experiment_schema import ExperimentConfig
-from framework.config.infra_schema import InfraConfig
+from framework.config.infra_schema import InfraConfig, InfraLinkConfig
 
 
 def generate(
@@ -16,14 +17,14 @@ def generate(
     partitions_dir: Path,
     metrics_data_dir: Path,
     experiment_config_path: Path,
+    dataset_dir: Path,
 ) -> str:
     """Generate a docker-compose.yml for the experiment.
 
     One service is created per pipeline node plus one for the metrics server.
-    Link bandwidth limits from the infra config are applied via ``tc netem``
-    using the ``TC_BANDWIDTH_MBPS`` environment variable read by the container
-    entrypoint script.  Nodes with outgoing links that have bandwidth limits
-    receive ``cap_add: [NET_ADMIN]`` to allow tc to run.
+    Per-link tc rules are applied via HTB qdiscs using TC_LINK_<N>_* environment
+    variables read by entrypoint.sh.  Nodes with outgoing links that have any
+    traffic-shaping parameters receive ``cap_add: [NET_ADMIN]`` to allow tc to run.
 
     Args:
         exp: Experiment configuration.
@@ -32,16 +33,17 @@ def generate(
         partitions_dir: Host path to the ``.partitions`` directory.
         metrics_data_dir: Host path for metrics storage.
         experiment_config_path: Host path to the experiment YAML file.
+        dataset_dir: Host path to the dataset directory.
 
     Returns:
         YAML string for docker-compose.yml.
     """
-    outgoing_bw: dict[str, float] = {}
+    outgoing_links: dict[str, list[InfraLinkConfig]] = defaultdict(list)
     for link in infra.links:
-        if link.bandwidth_mbps is not None:
-            outgoing_bw[link.from_node] = link.bandwidth_mbps
+        if any([link.bandwidth_mbps, link.delay_ms, link.loss_pct]):
+            outgoing_links[link.from_node].append(link)
 
-    # node_map = {n.name: n for n in exp.nodes}
+    node_host_map = {n.name: n.host for n in exp.nodes}
     services: dict[str, Any] = {}
 
     # --- Metrics server ---
@@ -80,9 +82,17 @@ def generate(
             "PORT": str(node.port),
         }
 
-        bw = outgoing_bw.get(node.name)
-        if bw is not None:
-            env["TC_BANDWIDTH_MBPS"] = str(int(bw))
+        for i, link in enumerate(outgoing_links.get(node.name, [])):
+            prefix = f"TC_LINK_{i}"
+            env[f"{prefix}_HOST"] = node_host_map[link.to_node]
+            if link.bandwidth_mbps is not None:
+                env[f"{prefix}_MBPS"] = str(int(link.bandwidth_mbps))
+            if link.delay_ms is not None:
+                env[f"{prefix}_DELAY_MS"] = str(link.delay_ms)
+            if link.jitter_ms is not None:
+                env[f"{prefix}_JITTER_MS"] = str(link.jitter_ms)
+            if link.loss_pct is not None:
+                env[f"{prefix}_LOSS_PCT"] = str(link.loss_pct)
 
         svc: dict[str, Any] = {
             "image": image,
@@ -98,7 +108,7 @@ def generate(
             "restart": "unless-stopped",
         }
 
-        if bw is not None:
+        if outgoing_links.get(node.name):
             svc["cap_add"] = ["NET_ADMIN"]
 
         if infra_node:
@@ -122,6 +132,29 @@ def generate(
                 }
 
         services[node.host] = svc
+
+    node_service_names = [node.host for node in exp.nodes]
+    services["orchestrator"] = {
+        "image": image,
+        "hostname": "orchestrator",
+        "command": [
+            "python",
+            "-m",
+            "framework.orchestrator.runner",
+            "/app/experiment_dir",
+            "--callback-host",
+            "orchestrator",
+            "--callback-port",
+            "8080",
+        ],
+        "environment": {"PYTHONUNBUFFERED": "1"},
+        "volumes": [
+            f"{experiment_config_path.parent.resolve()}:/app/experiment_dir:ro",
+            f"{dataset_dir.resolve()}:{exp.dataset.path}:ro",
+        ],
+        "depends_on": ["metrics"] + node_service_names,
+        "networks": ["pipeline"],
+    }
 
     compose: dict[str, Any] = {
         "version": "3.8",

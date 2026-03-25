@@ -34,10 +34,7 @@ async def run_experiment(
     For each resolved sweep run:
       1. Push compression configs to all relevant nodes.
       2. Send dataset batches and collect results via the data client.
-      3. Save per-run records.
-      4. Emit result metrics.
-
-    Warns if referenced baseline results are not found.
+      3. Emit result metrics.
 
     Args:
         experiment_dir: Directory containing experiment.yaml and infra.yaml.
@@ -52,11 +49,8 @@ async def run_experiment(
             Defaults to ``exp.metrics_server.host``.
     """
     exp, _ = load_experiment_dir(experiment_dir)
-    results_dir = experiment_dir / "results"
 
     logger.info("Experiment: %s  model: %s", exp.name, exp.model)
-
-    _warn_missing_baselines(exp, experiment_dir.parent)
 
     runs = exp.resolve_sweep()
     logger.info("Sweep: %d run(s)", len(runs))
@@ -97,7 +91,6 @@ async def run_experiment(
                 exp=exp,
                 run_id=run.run_id,
                 first_node_url=first_node_url,
-                results_dir=results_dir,
                 emitter=emitter,
             )
 
@@ -193,23 +186,6 @@ def _log_run_summary(run_id: str, records: list[Any]) -> None:
             correct,
             total,
         )
-
-
-def _warn_missing_baselines(exp, experiments_root: Path) -> None:
-    """Log warnings for any referenced baselines whose results are not found.
-
-    Args:
-        exp: Experiment config with baseline references.
-        experiments_root: Parent directory containing all experiment dirs.
-    """
-    for baseline_name in exp.baselines:
-        results_path = experiments_root / baseline_name / "results"
-        if not results_path.exists() or not any(results_path.iterdir()):
-            logger.warning(
-                "Baseline '%s' has no results. Run it before analysing "
-                "this experiment for accurate comparisons.",
-                baseline_name,
-            )
 
 
 def main() -> None:

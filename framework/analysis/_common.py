@@ -25,26 +25,30 @@ def load_ndjson(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
-def load_records(results_dir: Path) -> dict[str, list[dict[str, Any]]]:
-    """Load per-run inference records from a results directory.
+def load_records(
+    metrics_dir: Path, experiment_id: str
+) -> dict[str, list[dict[str, Any]]]:
+    """Load per-run inference records from result.ndjson in the metrics store.
 
     Args:
-        results_dir: Directory containing one subdirectory per run_id, each
-            with a ``records.jsonl`` file.
+        metrics_dir: Root metrics directory (parent of experiment subdirectories).
+        experiment_id: Experiment name used as subdirectory within metrics_dir.
 
     Returns:
-        Mapping of run_id to list of record dicts.
+        Mapping of run_id to list of record dicts with ``ground_truth`` and
+        ``predicted`` fields suitable for :func:`compute_accuracy`.
     """
+    path = metrics_dir / experiment_id / "result.ndjson"
     run_records: dict[str, list[dict[str, Any]]] = {}
-    if not results_dir.exists():
-        return run_records
-    for run_dir in sorted(results_dir.iterdir()):
-        if not run_dir.is_dir():
+    for event in load_ndjson(path):
+        run_id = event.get("run_id")
+        if run_id is None:
             continue
-        path = run_dir / "records.jsonl"
-        if not path.exists():
-            continue
-        run_records[run_dir.name] = load_ndjson(path)
+        # ResultEvent stores ground truth as 'actual'; normalise to 'ground_truth'
+        if "actual" in event and "ground_truth" not in event:
+            event = dict(event)
+            event["ground_truth"] = event["actual"]
+        run_records.setdefault(run_id, []).append(event)
     return run_records
 
 

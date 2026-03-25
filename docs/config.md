@@ -3,7 +3,7 @@
 Experiments are defined by two YAML files in an experiment directory under `experiments/<name>/`:
 
 - `experiment.yaml` — logical experiment definition (model, topology, compression, sweep, dataset)
-- `infra.yaml` — infrastructure definition (node resources, link bandwidth)
+- `infra.yaml` — infrastructure definition (node resources, link traffic shaping)
 
 These are kept separate so the same logical experiment can be run under different infrastructure conditions without modifying the experiment definition.
 
@@ -86,7 +86,7 @@ dataset:
   max_in_flight: 10
 ```
 
-`path` is a host-side path, accessible by the orchestrator process.
+`path` is the path inside the orchestrator container. The deploy tool mounts the host dataset directory (passed via `--dataset-dir`) at this path. Configure it to a fixed well-known path (e.g. `/data/cifar10`) and pass the actual host path at deploy time.
 
 ### Baselines
 
@@ -96,7 +96,7 @@ baselines:
   - resnet56_distributed_baseline
 ```
 
-The orchestrator warns at startup if referenced baseline results are not found. Analysis scripts use baseline results as reference points for accuracy comparisons.
+Analysis scripts use baseline results from the metrics server as reference points for accuracy comparisons. If a baseline has not been run, its accuracy column shows `N/A`.
 
 To tag an experiment as a baseline itself:
 
@@ -111,7 +111,7 @@ baseline: single_node   # or distributed_no_compression
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `nodes` | list | yes | Node resource specifications |
-| `links` | list | no | Link bandwidth specifications |
+| `links` | list | no | Link traffic shaping specifications |
 | `inherits` | string | no | Path to a base infra config to inherit from |
 
 ### Node resources
@@ -136,14 +136,25 @@ nodes:
       gpu: 1
 ```
 
-### Link bandwidth
+### Link traffic shaping
 
 ```yaml
 links:
   - from: A
     to: B
-    bandwidth_mbps: 100
+    bandwidth_mbps: 100   # egress rate cap (Mbit/s)
+    delay_ms: 20          # added latency (ms)
+    jitter_ms: 5          # latency jitter (ms) — requires delay_ms
+    loss_pct: 0.1         # random packet loss (%)
 ```
+
+All four fields are optional. A link with none set produces no tc rules. Any combination is valid — for example, delay without a rate cap, or loss without delay.
+
+When any link parameter is set on a node's outgoing link, the deploy tool automatically:
+- Injects `TC_LINK_<N>_*` environment variables into the node container
+- Adds `cap_add: [NET_ADMIN]` (Docker) or `securityContext.capabilities.add: [NET_ADMIN]` (k8s)
+
+At container startup, `entrypoint.sh` resolves the downstream node's hostname to an IP and installs per-link HTB and netem qdiscs. Each outgoing link gets an independent tc class so links to different downstream nodes are shaped separately.
 
 ### Inheritance
 
@@ -156,6 +167,7 @@ links:
   - from: A
     to: B
     bandwidth_mbps: 10
+    delay_ms: 20
 ```
 
 Inheritance is resolved at load time. Nodes and links are merged by name and from/to pair respectively — child entries replace base entries with the same key. Inheritance is supported at any depth.

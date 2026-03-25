@@ -2,14 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import json
 import logging
 import pickle
 import time
 import uuid
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from pathlib import Path
 from typing import Any
 
 import httpx
@@ -128,7 +126,6 @@ class DataClient:
         exp: ExperimentConfig,
         run_id: str,
         first_node_url: str,
-        results_dir: Path,
         emitter: MetricsEmitter,
     ) -> list[RunRecord]:
         """Send all dataset batches for one sweep run and collect results.
@@ -141,7 +138,6 @@ class DataClient:
             exp: Experiment config (dataset, metrics server info).
             run_id: Current sweep run identifier for tagging.
             first_node_url: POST /infer URL of the first pipeline node.
-            results_dir: Directory to write records.jsonl into.
             emitter: Metrics emitter for ResultEvent emission.
 
         Returns:
@@ -225,7 +221,6 @@ class DataClient:
             for idx, images, labels in dataset.batches()
         ]
         await asyncio.gather(*tasks)
-        _save_records(records, results_dir, run_id)
         logger.info(
             "Run '%s' complete: %d/%d batches collected",
             run_id,
@@ -330,20 +325,3 @@ def _decode_predictions(data: str) -> list[int]:
     """
     tensor: torch.Tensor = pickle.loads(base64.b64decode(data))
     return tensor.argmax(dim=1).tolist()
-
-
-def _save_records(records: list[RunRecord], results_dir: Path, run_id: str) -> None:
-    """Append run records to a NDJSON file under results_dir/run_id/.
-
-    Args:
-        records: Completed inference records for this run.
-        results_dir: Parent directory for all run results.
-        run_id: Used as subdirectory name.
-    """
-    run_dir = results_dir / run_id
-    run_dir.mkdir(parents=True, exist_ok=True)
-    path = run_dir / "records.jsonl"
-    with open(path, "w") as f:
-        for record in records:
-            f.write(json.dumps(record.to_dict()) + "\n")
-    logger.info("Records saved to %s (%d entries)", path, len(records))

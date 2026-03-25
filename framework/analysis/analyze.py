@@ -23,7 +23,7 @@ def analyze(
 ) -> None:
     """Aggregate results and metrics for an experiment and print comparison tables.
 
-    Loads inference records from ``experiments/<name>/results/`` and timing
+    Loads inference records from ``metrics_dir/<name>/result.ndjson`` and timing
     metrics from ``metrics_dir/<name>/``, then prints three tables:
 
     - **Accuracy**: per-run accuracy with baseline reference columns.
@@ -41,7 +41,7 @@ def analyze(
         sys.exit(1)
 
     exp = load_experiment_config(experiment_dir / "experiment.yaml")
-    run_records = load_records(experiment_dir / "results")
+    run_records = load_records(metrics_dir, experiment_name)
     metrics = aggregate_metrics(metrics_dir, experiment_name)
 
     if not run_records and not metrics:
@@ -53,7 +53,7 @@ def analyze(
 
     baseline_accuracies: dict[str, float | None] = {}
     for baseline_name in exp.baselines:
-        bl_records = load_records(experiments_dir / baseline_name / "results")
+        bl_records = load_records(metrics_dir, baseline_name)
         if bl_records:
             all_records = [r for recs in bl_records.values() for r in recs]
             baseline_accuracies[baseline_name] = compute_accuracy(all_records)

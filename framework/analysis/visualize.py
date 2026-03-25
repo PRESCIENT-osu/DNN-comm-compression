@@ -53,12 +53,12 @@ def visualize(
     runs = exp.resolve_sweep()
     run_map = {r.run_id: r for r in runs}
 
-    run_records = load_records(experiment_dir / "results")
+    run_records = load_records(metrics_dir, experiment_name)
     metrics = aggregate_metrics(metrics_dir, experiment_name)
 
     baseline_accuracies: dict[str, float | None] = {}
     for baseline_name in exp.baselines:
-        bl_records = load_records(experiments_dir / baseline_name / "results")
+        bl_records = load_records(metrics_dir, baseline_name)
         if bl_records:
             all_records = [r for recs in bl_records.values() for r in recs]
             baseline_accuracies[baseline_name] = compute_accuracy(all_records)

@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
 import yaml
 
 from framework.config.experiment_schema import ExperimentConfig
-from framework.config.infra_schema import InfraConfig
+from framework.config.infra_schema import InfraConfig, InfraLinkConfig
 
 
 def generate(
@@ -17,6 +18,7 @@ def generate(
     metrics_data_dir: Path,
     experiment_config_path: Path,
     namespace: str = "default",
+    dataset_dir: Path | None = None,
 ) -> str:
     """Generate Kubernetes manifests for the experiment.
 
@@ -25,10 +27,11 @@ def generate(
       - One Pod + Service per pipeline node
       - A metrics server Pod + Service
 
-    Bandwidth limits from the infra config are applied via Cilium
-    ``kubernetes.io/egress-bandwidth`` pod annotations.  Partitions are
-    mounted from the host via hostPath volumes (suitable for kind local
-    development).
+    Per-link tc rules are applied via HTB qdiscs using TC_LINK_<N>_* environment
+    variables read by entrypoint.sh.  Node Services are headless so DNS resolves
+    directly to pod IPs, which is required for tc u32 filters to match correctly.
+    Partitions are mounted from the host via hostPath volumes (suitable for kind
+    local development).
 
     Args:
         exp: Experiment configuration.
@@ -38,6 +41,7 @@ def generate(
         metrics_data_dir: Host path for metrics storage.
         experiment_config_path: Host path to the experiment YAML file.
         namespace: Kubernetes namespace to deploy into.
+        dataset_dir: Host path to the dataset directory.
 
     Returns:
         Multi-document YAML string suitable for ``kubectl apply -f``.
@@ -48,14 +52,15 @@ def generate(
     docs.append(_metrics_pod(exp, infra, image, metrics_data_dir, namespace))
     docs.append(_metrics_service(exp, infra, namespace))
 
-    outgoing_bw: dict[str, float] = {}
+    outgoing_links: dict[str, list[InfraLinkConfig]] = defaultdict(list)
     for link in infra.links:
-        if link.bandwidth_mbps is not None:
-            outgoing_bw[link.from_node] = link.bandwidth_mbps
+        if any([link.bandwidth_mbps, link.delay_ms, link.loss_pct]):
+            outgoing_links[link.from_node].append(link)
+
+    node_host_map = {n.name: n.host for n in exp.nodes}
 
     for node in exp.nodes:
         infra_node = next((n for n in infra.nodes if n.name == node.name), None)
-        bw = outgoing_bw.get(node.name)
         docs.append(
             _node_pod(
                 node_cfg=node,
@@ -64,10 +69,22 @@ def generate(
                 image=image,
                 partitions_dir=partitions_dir,
                 namespace=namespace,
-                egress_bandwidth_mbps=bw,
+                outgoing_links=outgoing_links.get(node.name, []),
+                node_host_map=node_host_map,
             )
         )
         docs.append(_node_service(node, infra_node, namespace))
+
+    if dataset_dir is not None:
+        docs.append(
+            _orchestrator_job(
+                exp=exp,
+                image=image,
+                experiment_config_path=experiment_config_path,
+                dataset_dir=dataset_dir,
+                namespace=namespace,
+            )
+        )
 
     return "---\n".join(
         yaml.dump(doc, default_flow_style=False, sort_keys=False) for doc in docs
@@ -174,12 +191,10 @@ def _node_pod(
     image: str,
     partitions_dir: Path,
     namespace: str,
-    egress_bandwidth_mbps: float | None,
+    outgoing_links: list[InfraLinkConfig],
+    node_host_map: dict[str, str],
 ) -> dict[str, Any]:
     pod_name = f"node-{node_cfg.name.lower()}"
-    annotations: dict[str, str] = {}
-    if egress_bandwidth_mbps is not None:
-        annotations["kubernetes.io/egress-bandwidth"] = f"{int(egress_bandwidth_mbps)}M"
 
     env = [
         {"name": "NODE_NAME", "value": node_cfg.name},
@@ -192,6 +207,20 @@ def _node_pod(
         {"name": "PORT", "value": str(node_cfg.port)},
         {"name": "PYTHONUNBUFFERED", "value": "1"},
     ]
+
+    for i, link in enumerate(outgoing_links):
+        prefix = f"TC_LINK_{i}"
+        env.append({"name": f"{prefix}_HOST", "value": node_host_map[link.to_node]})
+        if link.bandwidth_mbps is not None:
+            env.append(
+                {"name": f"{prefix}_MBPS", "value": str(int(link.bandwidth_mbps))}
+            )
+        if link.delay_ms is not None:
+            env.append({"name": f"{prefix}_DELAY_MS", "value": str(link.delay_ms)})
+        if link.jitter_ms is not None:
+            env.append({"name": f"{prefix}_JITTER_MS", "value": str(link.jitter_ms)})
+        if link.loss_pct is not None:
+            env.append({"name": f"{prefix}_LOSS_PCT", "value": str(link.loss_pct)})
 
     resources: dict[str, Any] = {}
     if infra_node:
@@ -210,6 +239,30 @@ def _node_pod(
         if req or lim:
             resources = {"requests": req, "limits": lim}
 
+    container: dict[str, Any] = {
+        "name": pod_name,
+        "image": image,
+        "args": ["python", "-m", "framework.node.server"],
+        "ports": [{"containerPort": node_cfg.port}],
+        "env": env,
+        "resources": resources,
+        "volumeMounts": [
+            {
+                "name": "partitions",
+                "mountPath": "/app/.partitions",
+                "readOnly": True,
+            },
+            {
+                "name": "experiment-config",
+                "mountPath": "/app/config",
+                "readOnly": True,
+            },
+        ],
+    }
+
+    if outgoing_links:
+        container["securityContext"] = {"capabilities": {"add": ["NET_ADMIN"]}}
+
     return {
         "apiVersion": "v1",
         "kind": "Pod",
@@ -217,32 +270,10 @@ def _node_pod(
             "name": pod_name,
             "namespace": namespace,
             "labels": {"app": pod_name, "experiment": exp.name},
-            "annotations": annotations,
         },
         "spec": {
             "hostname": node_cfg.host,
-            "containers": [
-                {
-                    "name": pod_name,
-                    "image": image,
-                    "command": ["python", "-m", "framework.node.server"],
-                    "ports": [{"containerPort": node_cfg.port}],
-                    "env": env,
-                    "resources": resources,
-                    "volumeMounts": [
-                        {
-                            "name": "partitions",
-                            "mountPath": "/app/.partitions",
-                            "readOnly": True,
-                        },
-                        {
-                            "name": "experiment-config",
-                            "mountPath": "/app/config",
-                            "readOnly": True,
-                        },
-                    ],
-                }
-            ],
+            "containers": [container],
             "volumes": [
                 {
                     "name": "partitions",
@@ -264,6 +295,7 @@ def _node_service(node_cfg: Any, infra_node: Any, namespace: str) -> dict[str, A
         "targetPort": node_cfg.port,
     }
     spec: dict[str, Any] = {
+        "clusterIP": "None",
         "selector": {"app": pod_name},
         "ports": [port_spec],
     }
@@ -275,4 +307,89 @@ def _node_service(node_cfg: Any, infra_node: Any, namespace: str) -> dict[str, A
         "kind": "Service",
         "metadata": {"name": node_cfg.host, "namespace": namespace},
         "spec": spec,
+    }
+
+
+def _orchestrator_job(
+    exp: ExperimentConfig,
+    image: str,
+    experiment_config_path: Path,
+    dataset_dir: Path,
+    namespace: str,
+) -> dict[str, Any]:
+    """Generate a Kubernetes Job manifest for the experiment orchestrator.
+
+    The Job runs the sweep, collects results via its callback server, and
+    exits when complete.  CALLBACK_HOST is injected from the pod's own IP
+    via the Downward API so node pods can POST results back without a Service.
+
+    Args:
+        exp: Experiment configuration.
+        image: Docker image name.
+        experiment_config_path: Host path to experiment.yaml (parent dir is mounted).
+        dataset_dir: Host path to the dataset directory.
+        namespace: Kubernetes namespace.
+
+    Returns:
+        Job manifest dict.
+    """
+    job_name = f"{exp.name.lower().replace('_', '-')}-orchestrator"
+    return {
+        "apiVersion": "batch/v1",
+        "kind": "Job",
+        "metadata": {"name": job_name, "namespace": namespace},
+        "spec": {
+            "backoffLimit": 0,
+            "template": {
+                "spec": {
+                    "restartPolicy": "Never",
+                    "containers": [
+                        {
+                            "name": "orchestrator",
+                            "image": image,
+                            "args": [
+                                "python",
+                                "-m",
+                                "framework.orchestrator.runner",
+                                "/app/experiment_dir",
+                            ],
+                            "env": [
+                                {
+                                    "name": "CALLBACK_HOST",
+                                    "valueFrom": {
+                                        "fieldRef": {"fieldPath": "status.podIP"}
+                                    },
+                                },
+                                {"name": "CALLBACK_PORT", "value": "8080"},
+                                {"name": "PYTHONUNBUFFERED", "value": "1"},
+                            ],
+                            "volumeMounts": [
+                                {
+                                    "name": "experiment-dir",
+                                    "mountPath": "/app/experiment_dir",
+                                    "readOnly": True,
+                                },
+                                {
+                                    "name": "dataset",
+                                    "mountPath": exp.dataset.path,
+                                    "readOnly": True,
+                                },
+                            ],
+                        }
+                    ],
+                    "volumes": [
+                        {
+                            "name": "experiment-dir",
+                            "hostPath": {
+                                "path": str(experiment_config_path.parent.resolve())
+                            },
+                        },
+                        {
+                            "name": "dataset",
+                            "hostPath": {"path": str(dataset_dir.resolve())},
+                        },
+                    ],
+                }
+            },
+        },
     }

@@ -40,42 +40,46 @@ Run baselines before sweep experiments so analysis comparisons are available.
 docker build -t dnn-compression:latest .
 ```
 
-### 2. Generate the Docker Compose manifest
+### 2. Generate and apply the Docker Compose manifest
 
 ```bash
 python -m framework.deploy.deploy \
   --experiment experiments/resnet56_topk_sweep \
   --target docker \
   --partitions-dir models/resnet/.partitions \
-  --metrics-dir metrics_data
+  --dataset-dir .datasets/cifar10 \
+  --apply
 ```
 
-Manifest is written to `experiments/resnet56_topk_sweep/deploy/docker-compose.yml`.
+`--dataset-dir` is the host path to the dataset directory. It is mounted into the orchestrator container at the path configured in `experiment.yaml`.
 
-### 3. Start containers
+Or generate without applying and inspect first:
 
 ```bash
+python -m framework.deploy.deploy \
+  --experiment experiments/resnet56_topk_sweep \
+  --target docker \
+  --partitions-dir models/resnet/.partitions \
+  --dataset-dir .datasets/cifar10
+
 docker compose -f experiments/resnet56_topk_sweep/deploy/docker-compose.yml up -d
 ```
 
-### 4. Run the orchestrator
+The orchestrator starts automatically as part of the compose stack and runs the full sweep.
+
+### 3. Monitor
 
 ```bash
-python -m framework.orchestrator.runner experiments/resnet56_topk_sweep \
-  --node-host localhost \
-  --metrics-host localhost \
-  --callback-host <your-machine-ip>
+docker compose -f experiments/resnet56_topk_sweep/deploy/docker-compose.yml logs -f orchestrator
 ```
 
-`--callback-host` must be an IP reachable from inside the containers — use your machine's local network IP, not `127.0.0.1`. Find it with `ifconfig` or `ip addr`.
-
-### 5. Tear down
+### 4. Tear down
 
 ```bash
 docker compose -f experiments/resnet56_topk_sweep/deploy/docker-compose.yml down
 ```
 
-Repeat steps 2–5 for each experiment, substituting the experiment directory.
+Repeat steps 2–4 for each experiment, substituting the experiment directory.
 
 ---
 
@@ -87,8 +91,9 @@ These steps assume a kind cluster running on a remote server, with both your loc
 
 - kind cluster running on the server
 - `kubectl` configured on your local machine to reach the cluster
+- Docker image built and loaded into kind on the server
 - Partitions copied to the server at a known path (e.g. `~/partitions/resnet56`)
-- CIFAR-10 on your **local machine** at `.datasets/cifar10/` (the orchestrator runs locally)
+- CIFAR-10 on the **server** at a known path (e.g. `~/datasets/cifar10`) — the orchestrator Job runs inside the cluster
 
 ### 1. Build the image and load into kind
 
@@ -99,24 +104,7 @@ docker build -t dnn-compression:latest .
 kind load docker-image dnn-compression:latest
 ```
 
-### 2. Add NodePorts to the infra config
-
-NodePorts must be set in the experiment's `infra.yaml` to expose services outside the cluster. They are already set for `resnet56_topk_sweep`. For other experiments, add them similarly:
-
-```yaml
-# experiments/resnet56_topk_sweep/infra.yaml
-metrics_node_port: 30900
-
-nodes:
-  - name: A
-    node_port: 30800
-  - name: B
-    node_port: 30801
-  - name: C
-    node_port: 30802
-```
-
-### 3. Generate and apply manifests
+### 2. Generate and apply manifests
 
 From your local machine (with `kubectl` access to the cluster):
 
@@ -125,11 +113,12 @@ python -m framework.deploy.deploy \
   --experiment experiments/resnet56_topk_sweep \
   --target k8s \
   --partitions-dir /path/on/server/to/resnet56/partitions \
+  --dataset-dir /path/on/server/to/datasets/cifar10 \
   --metrics-dir /path/on/server/to/metrics_data \
   --apply
 ```
 
-`--partitions-dir` and `--metrics-dir` are hostPath values written into the pod specs — they must be paths accessible on the kind cluster nodes (i.e. paths on the server). If using paths outside `/tmp`, add `extraMounts` to your kind cluster config.
+`--partitions-dir`, `--dataset-dir`, and `--metrics-dir` are hostPath values written into pod specs — they must be paths accessible on the kind cluster nodes (i.e. paths on the server). If using paths outside `/tmp`, add `extraMounts` to your kind cluster config.
 
 Or generate without applying and inspect first:
 
@@ -138,23 +127,21 @@ python -m framework.deploy.deploy \
   --experiment experiments/resnet56_topk_sweep \
   --target k8s \
   --partitions-dir /path/on/server/to/resnet56/partitions \
+  --dataset-dir /path/on/server/to/datasets/cifar10 \
   --metrics-dir /path/on/server/to/metrics_data
 
 kubectl apply -f experiments/resnet56_topk_sweep/deploy/manifests.yaml
 ```
 
-### 4. Run the orchestrator
+The orchestrator runs as a Kubernetes Job inside the cluster. It connects to nodes and the metrics server via cluster DNS and exits when the sweep is complete.
+
+### 3. Monitor
 
 ```bash
-python -m framework.orchestrator.runner experiments/resnet56_topk_sweep \
-  --node-host <server-tailscale-ip> \
-  --metrics-host <server-tailscale-ip> \
-  --callback-host <local-machine-tailscale-ip>
+kubectl logs -f job/resnet56-topk-sweep-orchestrator
 ```
 
-Node services are exposed via NodePort on the server. The orchestrator reaches them at `<server-tailscale-ip>:<nodeport>`. The callback server runs on your local machine, reachable by pods through the server's host network and Tailscale routing.
-
-### 5. Tear down
+### 4. Tear down
 
 ```bash
 kubectl delete -f experiments/resnet56_topk_sweep/deploy/manifests.yaml

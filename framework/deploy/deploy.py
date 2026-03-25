@@ -53,6 +53,12 @@ def main() -> None:
         help="Host path for metrics storage (default: metrics_data)",
     )
     parser.add_argument(
+        "--dataset-dir",
+        type=Path,
+        required=True,
+        help="Host path to the dataset directory",
+    )
+    parser.add_argument(
         "--namespace",
         default="default",
         help="Kubernetes namespace (k8s target only, default: default)",
@@ -81,6 +87,7 @@ def main() -> None:
             partitions_dir=args.partitions_dir,
             metrics_data_dir=args.metrics_dir,
             experiment_config_path=experiment_config_path,
+            dataset_dir=args.dataset_dir,
         )
         out_path = deploy_dir / "docker-compose.yml"
         out_path.write_text(content)
@@ -103,6 +110,7 @@ def main() -> None:
             metrics_data_dir=args.metrics_dir,
             experiment_config_path=experiment_config_path,
             namespace=args.namespace,
+            dataset_dir=args.dataset_dir,
         )
         out_path = deploy_dir / "manifests.yaml"
         out_path.write_text(content)

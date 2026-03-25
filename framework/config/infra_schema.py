@@ -33,6 +33,9 @@ class InfraLinkConfig(BaseModel):
     from_node: str = Field(alias="from")
     to_node: str = Field(alias="to")
     bandwidth_mbps: float | None = None
+    delay_ms: float | None = None
+    jitter_ms: float | None = None
+    loss_pct: float | None = None
 
 
 class InfraConfig(BaseModel):
