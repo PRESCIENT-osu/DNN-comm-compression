@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import json
 import logging
 import math
 import pickle
@@ -20,7 +19,6 @@ import time
 import uuid
 from collections.abc import AsyncGenerator, Iterator
 from contextlib import asynccontextmanager
-from pathlib import Path
 from typing import Any
 
 import httpx
@@ -29,65 +27,15 @@ import torch.nn.functional as F
 import uvicorn
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
 from transformers import AutoTokenizer
 
-from framework.config.experiment_schema import DatasetConfig, ExperimentConfig
-from framework.node.metrics import EndToEndLatencyEvent, MetricsEmitter, ResultEvent
+from framework.datamodels.api import ResultPayload
+from framework.datamodels.events import EndToEndLatencyEvent, ResultEvent
+from framework.datamodels.experiment import DatasetConfig, ExperimentConfig
+from framework.datamodels.results import LlamaRunRecord
+from framework.nodes.metrics.emitter import MetricsEmitter
 
 logger = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# Result record
-# ---------------------------------------------------------------------------
-
-
-class LlamaRunRecord:
-    """A single completed inference result for one Llama batch.
-
-    For perplexity runs (WikiText-2): nll_sum and token_count are populated.
-    For accuracy runs (MMLU): ground_truth and predicted are populated.
-    """
-
-    def __init__(
-        self,
-        request_id: str,
-        batch_idx: int,
-        metric_type: str,
-        experiment_id: str,
-        run_id: str,
-        timestamp: float,
-        ground_truth: list[int] | None = None,
-        predicted: list[int] | None = None,
-        nll_sum: float = 0.0,
-        token_count: int = 0,
-    ) -> None:
-        self.request_id = request_id
-        self.batch_idx = batch_idx
-        self.metric_type = metric_type
-        self.experiment_id = experiment_id
-        self.run_id = run_id
-        self.timestamp = timestamp
-        self.ground_truth = ground_truth or []
-        self.predicted = predicted or []
-        self.nll_sum = nll_sum
-        self.token_count = token_count
-
-    def to_dict(self) -> dict[str, Any]:
-        """Serialise record to a JSON-compatible dict."""
-        return {
-            "request_id": self.request_id,
-            "batch_idx": self.batch_idx,
-            "metric_type": self.metric_type,
-            "experiment_id": self.experiment_id,
-            "run_id": self.run_id,
-            "timestamp": self.timestamp,
-            "ground_truth": self.ground_truth,
-            "predicted": self.predicted,
-            "nll_sum": self.nll_sum,
-            "token_count": self.token_count,
-        }
 
 
 # ---------------------------------------------------------------------------
@@ -202,16 +150,6 @@ class _MMLUBatches:
 
 
 # ---------------------------------------------------------------------------
-# Callback server payload model
-# ---------------------------------------------------------------------------
-
-
-class _ResultPayload(BaseModel):
-    task_id: str
-    data: str
-
-
-# ---------------------------------------------------------------------------
 # LlamaDataClient
 # ---------------------------------------------------------------------------
 
@@ -248,7 +186,7 @@ class LlamaDataClient:
         self._callback_host = callback_host
         self._callback_port = callback_port
         self._result_timeout_s = result_timeout_s
-        self._pending: dict[str, asyncio.Future[_ResultPayload]] = {}
+        self._pending: dict[str, asyncio.Future[ResultPayload]] = {}
         self._pending_inputs: dict[str, torch.Tensor] = {}
         self._server_task: asyncio.Task[None] | None = None
         self._server: uvicorn.Server | None = None
@@ -273,7 +211,6 @@ class LlamaDataClient:
         exp: ExperimentConfig,
         run_id: str,
         first_node_url: str,
-        results_dir: Path,
         emitter: MetricsEmitter,
     ) -> list[LlamaRunRecord]:
         """Send all dataset batches for one sweep run and collect results.
@@ -282,7 +219,6 @@ class LlamaDataClient:
             exp: Experiment config (dataset config, metrics server info).
             run_id: Current sweep run identifier.
             first_node_url: POST /infer URL of the first pipeline node.
-            results_dir: Directory to write records.jsonl into.
             emitter: Metrics emitter for ResultEvent emission.
 
         Returns:
@@ -309,7 +245,7 @@ class LlamaDataClient:
         ) -> None:
             task_id = f"{run_id}_{batch_idx}_{uuid.uuid4().hex[:6]}"
             async with semaphore:
-                future: asyncio.Future[_ResultPayload] = (
+                future: asyncio.Future[ResultPayload] = (
                     asyncio.get_event_loop().create_future()
                 )
                 self._pending[task_id] = future
@@ -406,7 +342,6 @@ class LlamaDataClient:
             for idx, input_ids, labels in loader.batches()
         ]
         await asyncio.gather(*tasks)
-        _save_records(records, results_dir, run_id)
         logger.info(
             "Run '%s' complete: %d/%d batches collected",
             run_id,
@@ -421,7 +356,7 @@ class LlamaDataClient:
         client_ref = self
 
         @app.post("/result")
-        async def handle_result(payload: _ResultPayload) -> JSONResponse:
+        async def handle_result(payload: ResultPayload) -> JSONResponse:
             future = client_ref._pending.get(payload.task_id)
             if future and not future.done():
                 future.set_result(payload)
@@ -532,22 +467,3 @@ def _decode_mmlu_result(data: str, answer_token_ids: list[int]) -> list[int]:
     last_logits = logits[:, -1, :]  # [B, V]
     cand_logits = last_logits[:, answer_token_ids]  # [B, 4]
     return cand_logits.argmax(dim=-1).tolist()
-
-
-def _save_records(
-    records: list[LlamaRunRecord], results_dir: Path, run_id: str
-) -> None:
-    """Append run records to a NDJSON file under results_dir/run_id/.
-
-    Args:
-        records: Completed inference records for this run.
-        results_dir: Parent directory for all run results.
-        run_id: Used as subdirectory name.
-    """
-    run_dir = results_dir / run_id
-    run_dir.mkdir(parents=True, exist_ok=True)
-    path = run_dir / "records.jsonl"
-    with open(path, "w") as f:
-        for record in records:
-            f.write(json.dumps(record.to_dict()) + "\n")
-    logger.info("Records saved to %s (%d entries)", path, len(records))

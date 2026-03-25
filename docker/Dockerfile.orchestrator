@@ -1,0 +1,35 @@
+# Orchestrator image.
+# No CUDA required — runs on CPU.  Needs torch for dataset batching and
+# tensor encode/decode, plus transformers/datasets for the Llama data client.
+#
+# Build context: repo root
+#   docker build -f docker/Dockerfile.orchestrator -t dnn-orchestrator:latest .
+
+FROM python:3.11-slim
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        gcc \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY pyproject.toml .
+RUN pip install --no-cache-dir \
+    torch --index-url https://download.pytorch.org/whl/cpu
+RUN pip install --no-cache-dir \
+    torchvision --index-url https://download.pytorch.org/whl/cpu
+RUN pip install --no-cache-dir \
+    fastapi \
+    "uvicorn[standard]" \
+    httpx \
+    pyyaml \
+    pydantic \
+    transformers \
+    datasets \
+    accelerate
+
+COPY framework/ ./framework/
+
+ENV PYTHONUNBUFFERED=1
+
+CMD ["python", "-m", "framework.nodes.orchestrator.runner"]

@@ -34,18 +34,30 @@ Run baselines before sweep experiments so analysis comparisons are available.
 
 ## Running on Docker
 
-### 1. Build the image
+### 1. Build the images
 
 ```bash
-docker build -t dnn-compression:latest .
+make build-resnet        # dnn-compute-resnet:latest
+make build-metrics       # dnn-metrics:latest
+make build-orchestrator  # dnn-orchestrator:latest
+
+# or all at once
+make build
 ```
 
-### 2. Generate and apply the Docker Compose manifest
+### 2. Validate the config
 
 ```bash
-python -m framework.deploy.deploy \
+make validate EXPERIMENT=experiments/resnet56_topk_sweep SHOW_RUNS=1
+```
+
+### 3. Generate and apply the Docker Compose manifest
+
+```bash
+python -m framework.deploy \
   --experiment experiments/resnet56_topk_sweep \
   --target docker \
+  --image dnn-compute-resnet:latest \
   --partitions-dir models/resnet/.partitions \
   --dataset-dir .datasets/cifar10 \
   --apply
@@ -56,9 +68,10 @@ python -m framework.deploy.deploy \
 Or generate without applying and inspect first:
 
 ```bash
-python -m framework.deploy.deploy \
+python -m framework.deploy \
   --experiment experiments/resnet56_topk_sweep \
   --target docker \
+  --image dnn-compute-resnet:latest \
   --partitions-dir models/resnet/.partitions \
   --dataset-dir .datasets/cifar10
 
@@ -67,19 +80,19 @@ docker compose -f experiments/resnet56_topk_sweep/deploy/docker-compose.yml up -
 
 The orchestrator starts automatically as part of the compose stack and runs the full sweep.
 
-### 3. Monitor
+### 4. Monitor
 
 ```bash
 docker compose -f experiments/resnet56_topk_sweep/deploy/docker-compose.yml logs -f orchestrator
 ```
 
-### 4. Tear down
+### 5. Tear down
 
 ```bash
 docker compose -f experiments/resnet56_topk_sweep/deploy/docker-compose.yml down
 ```
 
-Repeat steps 2–4 for each experiment, substituting the experiment directory.
+Repeat steps 3–5 for each experiment, substituting the experiment directory.
 
 ---
 
@@ -91,27 +104,39 @@ These steps assume a kind cluster running on a remote server, with both your loc
 
 - kind cluster running on the server
 - `kubectl` configured on your local machine to reach the cluster
-- Docker image built and loaded into kind on the server
+- Docker images built and loaded into kind on the server
 - Partitions copied to the server at a known path (e.g. `~/partitions/resnet56`)
 - CIFAR-10 on the **server** at a known path (e.g. `~/datasets/cifar10`) — the orchestrator Job runs inside the cluster
 
-### 1. Build the image and load into kind
+### 1. Build images and load into kind
 
 On the server:
 
 ```bash
-docker build -t dnn-compression:latest .
-kind load docker-image dnn-compression:latest
+make build-resnet
+make build-metrics
+make build-orchestrator
+
+kind load docker-image dnn-compute-resnet:latest
+kind load docker-image dnn-metrics:latest
+kind load docker-image dnn-orchestrator:latest
 ```
 
-### 2. Generate and apply manifests
+### 2. Validate the config
+
+```bash
+make validate EXPERIMENT=experiments/resnet56_topk_sweep
+```
+
+### 3. Generate and apply manifests
 
 From your local machine (with `kubectl` access to the cluster):
 
 ```bash
-python -m framework.deploy.deploy \
+python -m framework.deploy \
   --experiment experiments/resnet56_topk_sweep \
   --target k8s \
+  --image dnn-compute-resnet:latest \
   --partitions-dir /path/on/server/to/resnet56/partitions \
   --dataset-dir /path/on/server/to/datasets/cifar10 \
   --metrics-dir /path/on/server/to/metrics_data \
@@ -123,9 +148,10 @@ python -m framework.deploy.deploy \
 Or generate without applying and inspect first:
 
 ```bash
-python -m framework.deploy.deploy \
+python -m framework.deploy \
   --experiment experiments/resnet56_topk_sweep \
   --target k8s \
+  --image dnn-compute-resnet:latest \
   --partitions-dir /path/on/server/to/resnet56/partitions \
   --dataset-dir /path/on/server/to/datasets/cifar10 \
   --metrics-dir /path/on/server/to/metrics_data
@@ -135,13 +161,13 @@ kubectl apply -f experiments/resnet56_topk_sweep/deploy/manifests.yaml
 
 The orchestrator runs as a Kubernetes Job inside the cluster. It connects to nodes and the metrics server via cluster DNS and exits when the sweep is complete.
 
-### 3. Monitor
+### 4. Monitor
 
 ```bash
 kubectl logs -f job/resnet56-topk-sweep-orchestrator
 ```
 
-### 4. Tear down
+### 5. Tear down
 
 ```bash
 kubectl delete -f experiments/resnet56_topk_sweep/deploy/manifests.yaml

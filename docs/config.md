@@ -176,11 +176,22 @@ Inheritance is resolved at load time. Nodes and links are merged by name and fro
 
 When running a sweep experiment, the loader compares the sweep infra config against each referenced baseline's infra config and warns if node resources or link bandwidth differ on shared nodes/links. This check is skipped for the single-node baseline since it necessarily uses a different node topology.
 
+## Validation CLI
+
+```bash
+python -m framework.validate experiments/resnet56_topk_sweep
+python -m framework.validate experiments/resnet56_topk_sweep --show-runs
+
+# via Makefile
+make validate EXPERIMENT=experiments/resnet56_topk_sweep
+make validate EXPERIMENT=experiments/resnet56_topk_sweep SHOW_RUNS=1
+```
+
 ## Python API
 
 ```python
 from pathlib import Path
-from framework.config.loader import load_experiment_dir, check_infra_fairness
+from framework.utils.loader import load_experiment_dir, check_infra_fairness
 
 exp, infra = load_experiment_dir(Path("experiments/resnet56_topk_sweep"))
 
@@ -192,6 +203,6 @@ order = exp.node_order()
 ```
 
 Schemas are defined as Pydantic v2 models in:
-- `framework/config/experiment_schema.py`
-- `framework/config/infra_schema.py`
-- `framework/config/loader.py`
+- `framework/datamodels/experiment.py` — `ExperimentConfig`, `NodeConfig`, `ResolvedRun`, …
+- `framework/datamodels/infra.py` — `InfraConfig`, `InfraNodeConfig`, `InfraLinkConfig`
+- `framework/utils/loader.py` — `load_experiment_dir`, `load_infra_config`, `check_infra_fairness`

@@ -5,7 +5,7 @@ import logging
 
 import httpx
 
-from framework.config.experiment_schema import ExperimentConfig, ResolvedRun
+from framework.datamodels.experiment import ExperimentConfig, ResolvedRun
 
 logger = logging.getLogger(__name__)
 

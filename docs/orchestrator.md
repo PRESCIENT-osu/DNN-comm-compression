@@ -6,11 +6,11 @@ The orchestrator drives experiment sweeps as a containerised service. It coordin
 
 | Module | Role |
 |--------|------|
-| `framework/orchestrator/runner.py` | Top-level sweep loop and CLI entry point |
-| `framework/orchestrator/controller.py` | Pushes compression configs to nodes |
-| `framework/orchestrator/data_client.py` | Callback server, batch sending, result collection (image models) |
-| `framework/orchestrator/llama_data_client.py` | Data client for Llama — tokenizes text, decodes logits as perplexity or accuracy |
-| `framework/orchestrator/datasets.py` | Dataset loaders (image models) |
+| `framework/nodes/orchestrator/runner.py` | Top-level sweep loop and CLI entry point |
+| `framework/nodes/orchestrator/controller.py` | Pushes compression configs to nodes |
+| `framework/nodes/orchestrator/data_client.py` | Callback server, batch sending, result collection (image models) |
+| `framework/nodes/orchestrator/llama_data_client.py` | Data client for Llama — tokenizes text, decodes logits as perplexity or accuracy |
+| `framework/nodes/orchestrator/datasets.py` | Dataset loaders (image models) |
 
 ## Sweep Loop
 
@@ -84,7 +84,7 @@ The analysis tools read from `metrics_data/<experiment_id>/result.ndjson` direct
 
 `dataset.path` in the experiment config is the path inside the orchestrator container. The deploy tool mounts `--dataset-dir` (host path) at that container path.
 
-To add a new image dataset, subclass `Dataset` in `framework/orchestrator/datasets.py` and register it in `_REGISTRY`.
+To add a new image dataset, subclass `Dataset` in `framework/nodes/orchestrator/datasets.py` and register it in `_REGISTRY`.
 
 ### Llama
 

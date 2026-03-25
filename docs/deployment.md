@@ -2,23 +2,58 @@
 
 The deployment tool generates Docker Compose or Kubernetes manifests from an experiment directory and optionally applies them. Implemented in `framework/deploy/`.
 
-## Building the Image
+## Docker Images
+
+The framework uses four separate images — one per deployment role — to avoid shipping CUDA and PyTorch into containers that don't need them.
+
+| Image | Dockerfile | Base | Purpose |
+|-------|-----------|------|---------|
+| `dnn-compute-resnet` | `docker/Dockerfile.compute-resnet` | `pytorch/pytorch:2.4.0-cuda12.1-cudnn9-runtime` | ResNet pipeline nodes |
+| `dnn-compute-llama` | `docker/Dockerfile.compute-llama` | `pytorch/pytorch:2.4.0-cuda12.1-cudnn9-runtime` | Llama pipeline nodes |
+| `dnn-metrics` | `docker/Dockerfile.metrics` | `python:3.11-slim` | Metrics ingestion server |
+| `dnn-orchestrator` | `docker/Dockerfile.orchestrator` | `python:3.11-slim` | Experiment orchestrator (CPU only) |
+
+### Building images
 
 ```bash
-docker build -t dnn-compression:latest .
+# All four images at once
+make build
+
+# Individual images
+make build-resnet
+make build-llama
+make build-metrics
+make build-orchestrator
+
+# Custom tag
+make build IMAGE_TAG=v0.2
+make build-llama IMAGE_TAG=v0.2
 ```
 
-The image includes `iproute2` for `tc` traffic shaping. `entrypoint.sh` applies per-link bandwidth, delay, and loss rules before starting the node server or orchestrator.
+All `make build-*` targets use the repo root as the Docker build context. The equivalent direct commands are:
+
+```bash
+docker build -f docker/Dockerfile.compute-resnet -t dnn-compute-resnet:latest .
+docker build -f docker/Dockerfile.compute-llama  -t dnn-compute-llama:latest  .
+docker build -f docker/Dockerfile.metrics        -t dnn-metrics:latest        .
+docker build -f docker/Dockerfile.orchestrator   -t dnn-orchestrator:latest   .
+```
+
+### Traffic shaping
+
+The compute node images include `iproute2` and copy `entrypoint.sh`. When the deploy tool injects `TC_LINK_<N>_*` environment variables into a compute node service (because the corresponding infra link has bandwidth/delay/loss parameters), `entrypoint.sh` applies per-link HTB qdiscs and netem rules before starting the server.
+
+The metrics and orchestrator images do not include `entrypoint.sh` — they are never traffic-shaped.
 
 ## Generating Manifests
 
 ```bash
-python -m framework.deploy.deploy \
+python -m framework.deploy \
   --experiment experiments/resnet56_topk_sweep \
   --target docker|k8s \
   --partitions-dir models/resnet/.partitions \
   --dataset-dir .datasets/cifar10 \
-  [--image dnn-compression:latest] \
+  [--image dnn-compute-resnet:latest] \
   [--metrics-dir metrics_data] \
   [--namespace default] \
   [--apply]
@@ -35,6 +70,8 @@ Without `--apply`, manifests are written for inspection only. With `--apply`, th
 ## Docker Compose
 
 Generates one service per pipeline node, a metrics server service, and an orchestrator service, all on a shared `pipeline` bridge network.
+
+**Image selection**: the `--image` flag sets the compute node image. The metrics and orchestrator services always use `dnn-metrics` and `dnn-orchestrator` respectively (hardcoded in the backend). Pass the appropriate compute image for the model being deployed.
 
 **Port mapping**: each node must have a unique port in the experiment config (e.g. A:8000, B:8001, C:8002).
 
@@ -61,7 +98,7 @@ cd experiments/resnet56_topk_sweep/deploy
 docker compose up -d
 
 # Or via the deploy tool with --apply
-python -m framework.deploy.deploy \
+python -m framework.deploy \
   --experiment experiments/resnet56_topk_sweep \
   --target docker \
   --partitions-dir models/resnet/.partitions \
@@ -91,7 +128,7 @@ kubectl logs -f job/<experiment-name>-orchestrator
 
 **Applying**:
 ```bash
-python -m framework.deploy.deploy \
+python -m framework.deploy \
   --experiment experiments/resnet56_topk_sweep \
   --target k8s \
   --partitions-dir /path/on/server/to/partitions \

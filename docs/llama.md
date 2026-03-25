@@ -66,15 +66,17 @@ python models/llama/partition_llama.py \
 python models/llama/partition_llama.py --model /data/models/llama-3.1-8b ...
 ```
 
-## Step 2: Build the Llama Node Image
+## Step 2: Build the Images
 
-Llama nodes use a separate Dockerfile (`models/llama/Dockerfile`) and run `llama_server.py` instead of `server.py`. The image does not bake in model weights — partitions are mounted from the host at runtime.
+Llama nodes use `docker/Dockerfile.compute-llama`. The orchestrator and metrics server use their own images shared with ResNet experiments.
 
 ```bash
-docker build -f models/llama/Dockerfile -t llama-node:latest .
+make build-llama         # dnn-compute-llama:latest  (CUDA + transformers)
+make build-metrics       # dnn-metrics:latest
+make build-orchestrator  # dnn-orchestrator:latest
 ```
 
-The image installs the full `dnn-comm-compression` package. The `HF_HOME` and `PARTITIONS_DIR` environment variables are set to `/hf_cache` and `/partitions` respectively; both are mounted by docker-compose at runtime.
+The Llama compute image does not bake in model weights — partitions are mounted from the host at runtime via the `PARTITIONS_DIR` environment variable.
 
 ## Step 3: Run an Experiment
 
@@ -83,10 +85,13 @@ The image installs the full `dnn-comm-compression` package. The `HF_HOME` and `P
 The orchestrator tokenizes the WikiText-2 test set, sends `max_seq_len`-token chunks through the pipeline, receives logits, and computes per-token NLL → perplexity.
 
 ```bash
-python -m framework.orchestrator.runner \
-  experiments/llama_topk_sweep/experiment_wikitext.yaml \
-  --callback-host host.docker.internal \
-  --callback-port 8080
+python -m framework.deploy \
+  --experiment experiments/llama_topk_sweep \
+  --target docker \
+  --image dnn-compute-llama:latest \
+  --partitions-dir models/llama/.partitions \
+  --dataset-dir models/llama/.partitions/tokenizer \
+  --apply
 ```
 
 The runner logs perplexity after each sweep run:
@@ -101,13 +106,6 @@ Run 'e1_topk_0.30' perplexity: 9.13
 
 The orchestrator formats multiple-choice questions, sends tokenized prompts through the pipeline, receives logits, and picks the highest-scoring token among A/B/C/D.
 
-```bash
-python -m framework.orchestrator.runner \
-  experiments/llama_topk_sweep/experiment_mmlu.yaml \
-  --callback-host host.docker.internal \
-  --callback-port 8080
-```
-
 The runner logs accuracy after each run:
 ```
 Run 'e0_none_0.00' accuracy: 62.33% (187/300)
@@ -118,8 +116,14 @@ Run 'e1_topk_0.10' accuracy: 61.67% (185/300)
 ### Dry run (inspect sweep plan)
 
 ```bash
-python -m framework.orchestrator.runner \
+python -m framework.nodes.orchestrator.runner \
   experiments/llama_topk_sweep/experiment_wikitext.yaml --dry-run
+```
+
+### Monitor
+
+```bash
+docker compose -f experiments/llama_topk_sweep/deploy/docker-compose.yml logs -f orchestrator
 ```
 
 ## Experiment Config Fields

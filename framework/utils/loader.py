@@ -6,8 +6,8 @@ from typing import Any
 
 import yaml
 
-from framework.config.experiment_schema import ExperimentConfig
-from framework.config.infra_schema import InfraConfig
+from framework.datamodels.experiment import ExperimentConfig
+from framework.datamodels.infra import InfraConfig
 
 logger = logging.getLogger(__name__)
 

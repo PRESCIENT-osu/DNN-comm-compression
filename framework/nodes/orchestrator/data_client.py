@@ -8,69 +8,21 @@ import time
 import uuid
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from typing import Any
 
 import httpx
 import torch
 import uvicorn
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
 
-from framework.config.experiment_schema import ExperimentConfig
-from framework.node.metrics import EndToEndLatencyEvent, MetricsEmitter, ResultEvent
-from framework.orchestrator.datasets import get_dataset
+from framework.datamodels.api import ResultPayload
+from framework.datamodels.events import EndToEndLatencyEvent, ResultEvent
+from framework.datamodels.experiment import ExperimentConfig
+from framework.datamodels.results import RunRecord
+from framework.nodes.metrics.emitter import MetricsEmitter
+from framework.nodes.orchestrator.datasets import get_dataset
 
 logger = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# Result record
-# ---------------------------------------------------------------------------
-
-
-class RunRecord:
-    """A single completed inference result for one batch."""
-
-    def __init__(
-        self,
-        request_id: str,
-        batch_idx: int,
-        ground_truth: list[int],
-        predicted: list[int],
-        experiment_id: str,
-        run_id: str,
-        timestamp: float,
-    ) -> None:
-        self.request_id = request_id
-        self.batch_idx = batch_idx
-        self.ground_truth = ground_truth
-        self.predicted = predicted
-        self.experiment_id = experiment_id
-        self.run_id = run_id
-        self.timestamp = timestamp
-
-    def to_dict(self) -> dict[str, Any]:
-        """Serialise record to a JSON-compatible dict."""
-        return {
-            "request_id": self.request_id,
-            "batch_idx": self.batch_idx,
-            "ground_truth": self.ground_truth,
-            "predicted": self.predicted,
-            "experiment_id": self.experiment_id,
-            "run_id": self.run_id,
-            "timestamp": self.timestamp,
-        }
-
-
-# ---------------------------------------------------------------------------
-# Callback server (shared across all runs in a session)
-# ---------------------------------------------------------------------------
-
-
-class _ResultPayload(BaseModel):
-    task_id: str
-    data: str  # base64-encoded pickled output tensor
 
 
 class DataClient:
@@ -95,7 +47,7 @@ class DataClient:
         self._callback_host = callback_host
         self._callback_port = callback_port
         self._result_timeout_s = result_timeout_s
-        self._pending: dict[str, asyncio.Future[_ResultPayload]] = {}
+        self._pending: dict[str, asyncio.Future[ResultPayload]] = {}
         self._server_task: asyncio.Task[None] | None = None
         self._server: uvicorn.Server | None = None
         self._app = self._make_app()
@@ -153,7 +105,7 @@ class DataClient:
         ) -> None:
             task_id = f"{run_id}_{batch_idx}_{uuid.uuid4().hex[:6]}"
             async with semaphore:
-                future: asyncio.Future[_ResultPayload] = (
+                future: asyncio.Future[ResultPayload] = (
                     asyncio.get_event_loop().create_future()
                 )
                 self._pending[task_id] = future
@@ -235,7 +187,7 @@ class DataClient:
         client_ref = self
 
         @app.post("/result")
-        async def handle_result(payload: _ResultPayload) -> JSONResponse:
+        async def handle_result(payload: ResultPayload) -> JSONResponse:
             future = client_ref._pending.get(payload.task_id)
             if future and not future.done():
                 future.set_result(payload)

@@ -1,6 +1,13 @@
 # Node Server
 
-Each pipeline node runs a FastAPI server that handles inference requests, exposes a management API, and probes outgoing links when idle. Implemented in `framework/node/server.py`.
+Each pipeline node runs a FastAPI server that handles inference requests, exposes a management API, and probes outgoing links when idle.
+
+The server logic shared by all compute nodes lives in `framework/nodes/compute/common/server.py` as a `build_app(load_partitions_fn)` factory. Model-specific servers supply their own partition loader and call `build_app`:
+
+| Module | Model | Partition loading |
+|--------|-------|-------------------|
+| `framework/nodes/compute/resnet/server.py` | ResNet (TorchScript) | `torch.jit.load` |
+| `framework/nodes/compute/llama/server.py` | Llama (HuggingFace) | `torch.load(..., weights_only=False)` |
 
 ## Environment Variables
 
@@ -16,11 +23,20 @@ Each pipeline node runs a FastAPI server that handles inference requests, expose
 
 ## Running
 
+**ResNet node:**
 ```bash
 NODE_NAME=A \
 EXPERIMENT_CONFIG_PATH=experiments/resnet56_topk_sweep/experiment.yaml \
 PARTITIONS_DIR=/app/partitions \
-python -m framework.node.server --host 0.0.0.0 --port 8000
+python -m framework.nodes.compute.resnet.server --host 0.0.0.0 --port 8000
+```
+
+**Llama node:**
+```bash
+NODE_NAME=early \
+EXPERIMENT_CONFIG_PATH=experiments/llama_topk_sweep/experiment_wikitext.yaml \
+PARTITIONS_DIR=/partitions \
+python -m framework.nodes.compute.llama.server --host 0.0.0.0 --port 8000
 ```
 
 ## Inference API
@@ -112,28 +128,7 @@ At startup the server calls `torch.cuda.is_available()`. If a CUDA device is pre
 
 ## Partition Loading
 
-Partitions are loaded as TorchScript modules (`torch.jit.load`) from `PARTITIONS_DIR/<name>.pt` in the order specified by the node's `partitions` list in the experiment config. All models are set to eval mode.
+Partitions are loaded from `PARTITIONS_DIR/<name>.pt` in the order specified by the node's `partitions` list in the experiment config. All models are set to eval mode.
 
-## Llama Node Server
-
-Llama experiments use a separate server implementation (`framework/node/llama_server.py`) because HuggingFace Llama models are not TorchScript-compatible. `llama_server.py` is identical to `server.py` except:
-
-- Partitions are loaded via `torch.load(..., weights_only=False)` instead of `torch.jit.load`
-- `models.llama.partition_llama` is imported at startup so that Python's pickle machinery can find the `LlamaPartition*` classes when deserialising the `.pt` files
-
-All APIs (`/infer`, `/health`, `/status`, `/config`, `/probe`), the compression pipeline, metrics emission, and link probing are identical between the two servers.
-
-**Running the Llama server:**
-```bash
-NODE_NAME=early \
-EXPERIMENT_CONFIG_PATH=experiments/llama_topk_sweep/experiment_wikitext.yaml \
-PARTITIONS_DIR=/partitions \
-python -m framework.node.llama_server --host 0.0.0.0 --port 8000
-```
-
-**Building the image:**
-```bash
-docker build -f models/llama/Dockerfile -t llama-node:latest .
-```
-
-The Llama Dockerfile is at `models/llama/Dockerfile` and sets `PARTITIONS_DIR=/partitions` and `HF_HOME=/hf_cache` as defaults, both expected to be volume mounts. See [docs/llama.md](llama.md) for the full workflow.
+- **ResNet**: `torch.jit.load` (TorchScript)
+- **Llama**: `torch.load(..., weights_only=False)`. `models.llama.partition_llama` is imported at module load so Python's pickle machinery can find the `LlamaPartition*` classes when deserialising the `.pt` files.

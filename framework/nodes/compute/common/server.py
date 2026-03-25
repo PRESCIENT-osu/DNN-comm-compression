@@ -1,5 +1,3 @@
-"""Llama node server — identical to server.py except partitions are loaded via torch.load."""
-
 from __future__ import annotations
 
 import asyncio
@@ -8,7 +6,7 @@ import logging
 import os
 import pickle
 import time
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -17,20 +15,19 @@ import httpx
 import torch
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
 
-import models.llama.partition_llama as _llama_partitions  # noqa: F401
-from framework.config.experiment_schema import CompressionMethod
-from framework.config.loader import load_experiment_config
-from framework.node.compressor import get_compressor
-from framework.node.metrics import (
+from framework.datamodels.api import ConfigUpdate, InferRequest
+from framework.datamodels.events import (
     CompressEvent,
     DecompressEvent,
     ForwardPassEvent,
     LinkProbeEvent,
-    MetricsEmitter,
     SendEvent,
 )
+from framework.datamodels.experiment import CompressionMethod
+from framework.nodes.compute.common.compressor import get_compressor
+from framework.nodes.metrics.emitter import MetricsEmitter
+from framework.utils.loader import load_experiment_config
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +84,6 @@ class NodeState:
         self.idle_event: asyncio.Event = asyncio.Event()
         self.idle_event.set()
 
-        # Updated with each inference request for probe event context
         self.last_experiment_id: str = "unknown"
         self.last_run_id: str = "none"
 
@@ -109,208 +105,143 @@ class NodeState:
 
 
 # ---------------------------------------------------------------------------
-# Request / response models
+# App factory
 # ---------------------------------------------------------------------------
 
 
-class InferRequest(BaseModel):
-    """Payload for POST /infer."""
-
-    task_id: str
-    callback_url: str
-    experiment_id: str
-    run_id: str
-    data: str  # base64-encoded bytes (compressed activation or raw input)
-
-
-class ConfigUpdate(BaseModel):
-    """Payload for POST /config."""
-
-    direction: str  # "incoming" or "outgoing"
-    method: CompressionMethod
-    rate: float = 0.0
-    drain_timeout_s: float = 60.0
-    outlier_precision: str = "fp16"
-    regular_precision: str = "int8"
-
-
-# ---------------------------------------------------------------------------
-# FastAPI app
-# ---------------------------------------------------------------------------
-
-_state: NodeState | None = None
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    global _state
-    _state = await _initialize()
-    await _state.emitter.start()
-    if not _state.is_last_node:
-        asyncio.create_task(_probe_loop(_state), name="link-prober")
-    logger.info(
-        "Node '%s' ready on device '%s' (first=%s, last=%s)",
-        _state.node_name,
-        _state.device,
-        _state.is_first_node,
-        _state.is_last_node,
-    )
-    yield
-    await _state.emitter.stop()
-
-
-app = FastAPI(lifespan=lifespan)
-
-
-# ---------------------------------------------------------------------------
-# Inference API
-# ---------------------------------------------------------------------------
-
-
-@app.post("/infer", status_code=202)
-async def infer(request: InferRequest) -> JSONResponse:
-    """Accept an inference request and process it asynchronously.
-
-    Returns immediately with 202 Accepted.  Processing (decompress,
-    forward pass, compress, forward) happens in a background task.
+def build_app(
+    load_partitions_fn: Callable[[list[str], Path, str], list[Any]],
+) -> FastAPI:
+    """Create and return a configured FastAPI node server app.
 
     Args:
-        request: Inference request payload.
+        load_partitions_fn: Callable that loads model partitions from disk.
+            Signature: (partition_names, partitions_dir, device) -> list of modules.
 
     Returns:
-        JSON with task_id and accepted status.
+        Configured FastAPI application.
     """
-    assert _state is not None
-    _state.increment_in_flight()
-    asyncio.create_task(
-        _process_inference(_state, request), name=f"infer-{request.task_id}"
-    )
-    return JSONResponse({"task_id": request.task_id, "status": "accepted"})
+    _state: list[NodeState | None] = [None]
 
-
-# ---------------------------------------------------------------------------
-# Management API
-# ---------------------------------------------------------------------------
-
-
-@app.get("/health")
-async def health() -> JSONResponse:
-    """Return node health status.
-
-    Returns:
-        JSON with status and node name.
-    """
-    assert _state is not None
-    return JSONResponse({"status": "ok", "node": _state.node_name})
-
-
-@app.get("/status")
-async def status() -> JSONResponse:
-    """Return current node status including in-flight count and compression config.
-
-    Returns:
-        JSON with node name, in-flight count, device, and compression config.
-    """
-    assert _state is not None
-    return JSONResponse(
-        {
-            "node": _state.node_name,
-            "in_flight": _state.in_flight,
-            "device": _state.device,
-            "incoming": {
-                "method": _state.incoming_method.value,
-                "rate": _state.incoming_rate,
-            },
-            "outgoing": {
-                "method": _state.outgoing_method.value,
-                "rate": _state.outgoing_rate,
-            },
-        }
-    )
-
-
-@app.post("/config")
-async def update_config(update: ConfigUpdate) -> JSONResponse:
-    """Update the compression config for the incoming or outgoing link.
-
-    Waits for in-flight requests to drain before applying the new config.
-
-    Args:
-        update: Config update specifying direction, method, and rate.
-
-    Returns:
-        JSON with status and the applied config.
-
-    Raises:
-        HTTPException 400: If direction is not "incoming" or "outgoing".
-        HTTPException 409: If drain timeout is exceeded.
-    """
-    assert _state is not None
-    if update.direction not in ("incoming", "outgoing"):
-        raise HTTPException(
-            status_code=400,
-            detail=f"direction must be 'incoming' or 'outgoing', got '{update.direction}'",
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+        _state[0] = await _initialize(load_partitions_fn)
+        await _state[0].emitter.start()  # type: ignore[union-attr]
+        if not _state[0].is_last_node:  # type: ignore[union-attr]
+            asyncio.create_task(_probe_loop(_state[0]), name="link-prober")  # type: ignore[arg-type]
+        logger.info(
+            "Node '%s' ready on device '%s' (first=%s, last=%s)",
+            _state[0].node_name,  # type: ignore[union-attr]
+            _state[0].device,  # type: ignore[union-attr]
+            _state[0].is_first_node,  # type: ignore[union-attr]
+            _state[0].is_last_node,  # type: ignore[union-attr]
         )
-    try:
-        await asyncio.wait_for(_state.idle_event.wait(), timeout=update.drain_timeout_s)
-    except TimeoutError:
-        raise HTTPException(
-            status_code=409,
-            detail=f"Timed out waiting for in-flight requests to drain after {update.drain_timeout_s}s",
-        ) from None
-    if update.direction == "incoming":
-        _state.incoming_method = update.method
-        _state.incoming_rate = update.rate
-        _state.incoming_outlier_precision = update.outlier_precision
-        _state.incoming_regular_precision = update.regular_precision
-    else:
-        _state.outgoing_method = update.method
-        _state.outgoing_rate = update.rate
-        _state.outgoing_outlier_precision = update.outlier_precision
-        _state.outgoing_regular_precision = update.regular_precision
-    logger.info(
-        "Config updated: %s → method=%s rate=%s",
-        update.direction,
-        update.method.value,
-        update.rate,
-    )
-    return JSONResponse(
-        {
-            "status": "ok",
-            "direction": update.direction,
-            "method": update.method.value,
-            "rate": update.rate,
-        }
-    )
+        yield
+        await _state[0].emitter.stop()  # type: ignore[union-attr]
 
+    app = FastAPI(lifespan=lifespan)
 
-# ---------------------------------------------------------------------------
-# Probe API
-# ---------------------------------------------------------------------------
+    # -----------------------------------------------------------------------
+    # Inference API
+    # -----------------------------------------------------------------------
 
+    @app.post("/infer", status_code=202)
+    async def infer(request: InferRequest) -> JSONResponse:
+        state = _state[0]
+        assert state is not None
+        state.increment_in_flight()
+        asyncio.create_task(
+            _process_inference(state, request), name=f"infer-{request.task_id}"
+        )
+        return JSONResponse({"task_id": request.task_id, "status": "accepted"})
 
-@app.get("/probe")
-async def probe_rtt() -> JSONResponse:
-    """Respond to an RTT probe from the previous node's prober.
+    # -----------------------------------------------------------------------
+    # Management API
+    # -----------------------------------------------------------------------
 
-    Returns:
-        JSON with status and server-side timestamp.
-    """
-    return JSONResponse({"status": "ok", "timestamp": time.time()})
+    @app.get("/health")
+    async def health() -> JSONResponse:
+        state = _state[0]
+        assert state is not None
+        return JSONResponse({"status": "ok", "node": state.node_name})
 
+    @app.get("/status")
+    async def status() -> JSONResponse:
+        state = _state[0]
+        assert state is not None
+        return JSONResponse(
+            {
+                "node": state.node_name,
+                "in_flight": state.in_flight,
+                "device": state.device,
+                "incoming": {
+                    "method": state.incoming_method.value,
+                    "rate": state.incoming_rate,
+                },
+                "outgoing": {
+                    "method": state.outgoing_method.value,
+                    "rate": state.outgoing_rate,
+                },
+            }
+        )
 
-@app.post("/probe")
-async def probe_throughput(request: Request) -> JSONResponse:
-    """Receive a throughput probe payload and return its size.
+    @app.post("/config")
+    async def update_config(update: ConfigUpdate) -> JSONResponse:
+        state = _state[0]
+        assert state is not None
+        if update.direction not in ("incoming", "outgoing"):
+            raise HTTPException(
+                status_code=400,
+                detail=f"direction must be 'incoming' or 'outgoing', got '{update.direction}'",
+            )
+        try:
+            await asyncio.wait_for(
+                state.idle_event.wait(), timeout=update.drain_timeout_s
+            )
+        except TimeoutError:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Timed out waiting for in-flight requests to drain after {update.drain_timeout_s}s",
+            ) from None
+        if update.direction == "incoming":
+            state.incoming_method = update.method
+            state.incoming_rate = update.rate
+            state.incoming_outlier_precision = update.outlier_precision
+            state.incoming_regular_precision = update.regular_precision
+        else:
+            state.outgoing_method = update.method
+            state.outgoing_rate = update.rate
+            state.outgoing_outlier_precision = update.outlier_precision
+            state.outgoing_regular_precision = update.regular_precision
+        logger.info(
+            "Config updated: %s → method=%s rate=%s",
+            update.direction,
+            update.method.value,
+            update.rate,
+        )
+        return JSONResponse(
+            {
+                "status": "ok",
+                "direction": update.direction,
+                "method": update.method.value,
+                "rate": update.rate,
+            }
+        )
 
-    Args:
-        request: HTTP request carrying an arbitrary binary payload.
+    # -----------------------------------------------------------------------
+    # Probe API
+    # -----------------------------------------------------------------------
 
-    Returns:
-        JSON with received byte count and server-side timestamp.
-    """
-    body = await request.body()
-    return JSONResponse({"received_bytes": len(body), "timestamp": time.time()})
+    @app.get("/probe")
+    async def probe_rtt() -> JSONResponse:
+        return JSONResponse({"status": "ok", "timestamp": time.time()})
+
+    @app.post("/probe")
+    async def probe_throughput(request: Request) -> JSONResponse:
+        body = await request.body()
+        return JSONResponse({"received_bytes": len(body), "timestamp": time.time()})
+
+    return app
 
 
 # ---------------------------------------------------------------------------
@@ -319,23 +250,11 @@ async def probe_throughput(request: Request) -> JSONResponse:
 
 
 async def _process_inference(state: NodeState, request: InferRequest) -> None:
-    """Execute the full inference pipeline for one request.
-
-    Decompresses the incoming payload, runs the forward pass, compresses
-    the output, and forwards it to the next node or the callback URL.
-    Metrics are emitted at each step.  The in-flight counter is always
-    decremented in the finally block.
-
-    Args:
-        state: Current node runtime state.
-        request: The inference request to process.
-    """
     state.last_experiment_id = request.experiment_id
     state.last_run_id = request.run_id
     try:
         raw_bytes = base64.b64decode(request.data)
 
-        # --- Decompress (skip for first node) ---
         if state.is_first_node:
             tensor: torch.Tensor = pickle.loads(raw_bytes)
         else:
@@ -357,7 +276,6 @@ async def _process_inference(state: NodeState, request: InferRequest) -> None:
                 )
             )
 
-        # --- Forward pass ---
         t0 = time.perf_counter()
         with torch.no_grad():
             for partition in state.partitions:
@@ -373,13 +291,11 @@ async def _process_inference(state: NodeState, request: InferRequest) -> None:
             )
         )
 
-        # --- Last node: send result to callback ---
         if state.is_last_node:
             result_bytes = pickle.dumps(tensor.cpu())
             await _send_result(request.task_id, request.callback_url, result_bytes)
             return
 
-        # --- Compress ---
         t0 = time.perf_counter()
         out_compressor = get_compressor(
             state.outgoing_method,
@@ -402,7 +318,6 @@ async def _process_inference(state: NodeState, request: InferRequest) -> None:
             )
         )
 
-        # --- Forward to next node ---
         assert state.next_node_url is not None
         assert state.next_node_name is not None
         t0 = time.perf_counter()
@@ -428,13 +343,6 @@ async def _process_inference(state: NodeState, request: InferRequest) -> None:
 async def _forward_to_next(
     next_url: str, request: InferRequest, compressed: bytes
 ) -> None:
-    """Forward a compressed activation to the next node.
-
-    Args:
-        next_url: POST /infer URL of the next node.
-        request: Original inference request (carries task_id, callback_url, etc.).
-        compressed: Compressed activation bytes to forward.
-    """
     payload: dict[str, Any] = {
         "task_id": request.task_id,
         "callback_url": request.callback_url,
@@ -448,13 +356,6 @@ async def _forward_to_next(
 
 
 async def _send_result(task_id: str, callback_url: str, result_bytes: bytes) -> None:
-    """Send the final inference result back to the orchestrator callback.
-
-    Args:
-        task_id: Request identifier.
-        callback_url: Orchestrator callback endpoint URL.
-        result_bytes: Pickled result tensor.
-    """
     payload: dict[str, Any] = {
         "task_id": task_id,
         "data": base64.b64encode(result_bytes).decode(),
@@ -470,18 +371,8 @@ async def _send_result(task_id: str, callback_url: str, result_bytes: bytes) -> 
 
 
 async def _probe_loop(state: NodeState) -> None:
-    """Background task that probes the outgoing link when the node is idle.
-
-    Waits for the idle event (in_flight == 0), performs RTT and throughput
-    probes against the next node, emits a LinkProbeEvent, then sleeps for
-    probe_interval_s before trying again.
-
-    Args:
-        state: Current node runtime state.
-    """
     while True:
         await state.idle_event.wait()
-        # Brief settle to avoid probing during the very start of idle
         await asyncio.sleep(0.5)
         if state.in_flight > 0 or state.next_node_url is None:
             continue
@@ -489,13 +380,11 @@ async def _probe_loop(state: NodeState) -> None:
         rtt_ms: float | None = None
         throughput_mbps: float | None = None
         try:
-            # RTT probe
             t0 = time.perf_counter()
             async with httpx.AsyncClient(timeout=10.0) as client:
                 await client.get(f"{probe_base_url}/probe")
             rtt_ms = (time.perf_counter() - t0) * 1000
 
-            # Throughput probe
             payload = bytes(_PROBE_PAYLOAD_BYTES)
             t0 = time.perf_counter()
             async with httpx.AsyncClient(timeout=30.0) as client:
@@ -535,22 +424,9 @@ async def _probe_loop(state: NodeState) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def _initialize() -> NodeState:
-    """Build NodeState from environment variables and experiment config.
-
-    Reads NODE_NAME, EXPERIMENT_CONFIG_PATH, PARTITIONS_DIR,
-    METRICS_SERVER_URL, PROBE_INTERVAL_S, and METRICS_BUFFER_SIZE from
-    the environment.  Loads the experiment config, resolves this node's
-    partition assignments and link configs, loads partition models, and
-    auto-detects the available device.
-
-    Returns:
-        Fully initialised NodeState ready for use.
-
-    Raises:
-        RuntimeError: If required environment variables are missing or the
-            node name is not found in the experiment config.
-    """
+async def _initialize(
+    load_partitions_fn: Callable[[list[str], Path, str], list[Any]],
+) -> NodeState:
     node_name = _require_env("NODE_NAME")
     config_path = Path(_require_env("EXPERIMENT_CONFIG_PATH"))
     partitions_dir = Path(_require_env("PARTITIONS_DIR"))
@@ -569,7 +445,6 @@ async def _initialize() -> NodeState:
     is_first_node = order[0] == node_name
     is_last_node = order[-1] == node_name
 
-    # Resolve incoming link (from previous node → this node)
     incoming_link = next((lk for lk in exp.links if lk.to_node == node_name), None)
     incoming_method = (
         incoming_link.compression if incoming_link else CompressionMethod.NONE
@@ -582,7 +457,6 @@ async def _initialize() -> NodeState:
         incoming_link.regular_precision if incoming_link else "int8"
     )
 
-    # Resolve outgoing link (this node → next node)
     outgoing_link = next((lk for lk in exp.links if lk.from_node == node_name), None)
     outgoing_method = (
         outgoing_link.compression if outgoing_link else CompressionMethod.NONE
@@ -595,7 +469,6 @@ async def _initialize() -> NodeState:
         outgoing_link.regular_precision if outgoing_link else "int8"
     )
 
-    # Resolve next node URL
     next_node_url: str | None = None
     next_node_name: str | None = None
     if not is_last_node and outgoing_link:
@@ -606,9 +479,8 @@ async def _initialize() -> NodeState:
             next_node_url = f"http://{next_node_cfg.host}:{next_node_cfg.port}/infer"
             next_node_name = next_node_cfg.name
 
-    # Load partition models
     device = _detect_device()
-    partitions = _load_partitions(node_cfg.partitions, partitions_dir, device)
+    partitions = load_partitions_fn(node_cfg.partitions, partitions_dir, device)
 
     emitter = MetricsEmitter(
         server_url=metrics_url,
@@ -637,11 +509,6 @@ async def _initialize() -> NodeState:
 
 
 def _detect_device() -> str:
-    """Return the best available device string.
-
-    Returns:
-        ``"cuda"`` if a CUDA-capable GPU is available, otherwise ``"cpu"``.
-    """
     if torch.cuda.is_available():
         logger.info("CUDA available, using GPU")
         return "cuda"
@@ -649,69 +516,8 @@ def _detect_device() -> str:
     return "cpu"
 
 
-def _load_partitions(
-    partition_names: list[str],
-    partitions_dir: Path,
-    device: str,
-) -> list[Any]:
-    """Load Llama partition modules from disk via torch.load.
-
-    Args:
-        partition_names: Ordered list of partition identifiers (e.g. ``["p2", "p3"]``).
-        partitions_dir: Directory containing ``<name>.pt`` files.
-        device: Device to map the loaded models to.
-
-    Returns:
-        List of loaded nn.Module partitions in partition order.
-
-    Raises:
-        FileNotFoundError: If a partition file does not exist.
-    """
-    partitions = []
-    for name in partition_names:
-        path = partitions_dir / f"{name}.pt"
-        if not path.exists():
-            raise FileNotFoundError(f"Partition file not found: {path}")
-        model = torch.load(str(path), map_location=device, weights_only=False)
-        model.eval()
-        partitions.append(model)
-        logger.info("Loaded partition '%s' from %s", name, path)
-    return partitions
-
-
 def _require_env(key: str) -> str:
-    """Read a required environment variable.
-
-    Args:
-        key: Environment variable name.
-
-    Returns:
-        The variable's value.
-
-    Raises:
-        RuntimeError: If the variable is not set.
-    """
     value = os.getenv(key)
     if not value:
         raise RuntimeError(f"Required environment variable '{key}' is not set")
     return value
-
-
-def main() -> None:
-    """Entry point for running the node server from the command line."""
-    import argparse
-
-    import uvicorn
-
-    logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s"
-    )
-    parser = argparse.ArgumentParser(description="Llama DNN inference node server")
-    parser.add_argument("--host", default="0.0.0.0")
-    parser.add_argument("--port", type=int, default=int(os.getenv("PORT", "8000")))
-    args = parser.parse_args()
-    uvicorn.run(app, host=args.host, port=args.port)
-
-
-if __name__ == "__main__":
-    main()

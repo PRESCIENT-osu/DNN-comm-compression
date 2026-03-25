@@ -1,8 +1,15 @@
-.PHONY: lint format lint-fix install install-dev validate
+.PHONY: lint format lint-fix install install-dev validate \
+        build build-resnet build-llama build-metrics build-orchestrator
 
 VENV := .venv
 PYTHON := $(VENV)/bin/python
 PIP := $(VENV)/bin/pip
+
+IMAGE_TAG ?= latest
+IMAGE_RESNET      := dnn-compute-resnet:$(IMAGE_TAG)
+IMAGE_LLAMA       := dnn-compute-llama:$(IMAGE_TAG)
+IMAGE_METRICS     := dnn-metrics:$(IMAGE_TAG)
+IMAGE_ORCHESTRATOR := dnn-orchestrator:$(IMAGE_TAG)
 
 $(VENV):
 	python -m venv $(VENV)
@@ -29,4 +36,23 @@ validate:
 		echo "Usage: make validate EXPERIMENT=experiments/<name> [SHOW_RUNS=1]"; \
 		exit 1; \
 	fi
-	python -m framework.config.validate $(EXPERIMENT) $(if $(SHOW_RUNS),--show-runs)
+	$(PYTHON) -m framework.validate $(EXPERIMENT) $(if $(SHOW_RUNS),--show-runs)
+
+# ---------------------------------------------------------------------------
+# Docker image builds  (build context is always the repo root)
+# Override IMAGE_TAG to tag a specific version, e.g. make build IMAGE_TAG=v0.2
+# ---------------------------------------------------------------------------
+
+build: build-resnet build-llama build-metrics build-orchestrator
+
+build-resnet:
+	docker build -f docker/Dockerfile.compute-resnet -t $(IMAGE_RESNET) .
+
+build-llama:
+	docker build -f docker/Dockerfile.compute-llama -t $(IMAGE_LLAMA) .
+
+build-metrics:
+	docker build -f docker/Dockerfile.metrics -t $(IMAGE_METRICS) .
+
+build-orchestrator:
+	docker build -f docker/Dockerfile.orchestrator -t $(IMAGE_ORCHESTRATOR) .

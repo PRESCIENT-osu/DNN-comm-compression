@@ -6,8 +6,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-from framework.config.loader import load_experiment_dir
 from framework.deploy import docker_backend, k8s_backend
+from framework.utils.loader import load_experiment_dir
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 logger = logging.getLogger(__name__)

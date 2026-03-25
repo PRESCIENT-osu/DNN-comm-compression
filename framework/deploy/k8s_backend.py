@@ -6,8 +6,15 @@ from typing import Any
 
 import yaml
 
-from framework.config.experiment_schema import ExperimentConfig
-from framework.config.infra_schema import InfraConfig, InfraLinkConfig
+from framework.datamodels.experiment import ExperimentConfig
+from framework.datamodels.infra import InfraConfig, InfraLinkConfig
+
+
+def _compute_node_module(model: str) -> str:
+    """Return the server module path for the given model name."""
+    if model.lower().startswith("llama"):
+        return "framework.nodes.compute.llama.server"
+    return "framework.nodes.compute.resnet.server"
 
 
 def generate(
@@ -58,6 +65,7 @@ def generate(
             outgoing_links[link.from_node].append(link)
 
     node_host_map = {n.name: n.host for n in exp.nodes}
+    node_module = _compute_node_module(exp.model)
 
     for node in exp.nodes:
         infra_node = next((n for n in infra.nodes if n.name == node.name), None)
@@ -71,6 +79,7 @@ def generate(
                 namespace=namespace,
                 outgoing_links=outgoing_links.get(node.name, []),
                 node_host_map=node_host_map,
+                node_module=node_module,
             )
         )
         docs.append(_node_service(node, infra_node, namespace))
@@ -134,7 +143,7 @@ def _metrics_pod(
                     "command": [
                         "python",
                         "-m",
-                        "framework.metrics_server.server",
+                        "framework.nodes.metrics.server",
                         "--host",
                         "0.0.0.0",
                         "--port",
@@ -193,6 +202,7 @@ def _node_pod(
     namespace: str,
     outgoing_links: list[InfraLinkConfig],
     node_host_map: dict[str, str],
+    node_module: str,
 ) -> dict[str, Any]:
     pod_name = f"node-{node_cfg.name.lower()}"
 
@@ -242,7 +252,7 @@ def _node_pod(
     container: dict[str, Any] = {
         "name": pod_name,
         "image": image,
-        "args": ["python", "-m", "framework.node.server"],
+        "args": ["python", "-m", node_module],
         "ports": [{"containerPort": node_cfg.port}],
         "env": env,
         "resources": resources,
@@ -350,7 +360,7 @@ def _orchestrator_job(
                             "args": [
                                 "python",
                                 "-m",
-                                "framework.orchestrator.runner",
+                                "framework.nodes.orchestrator.runner",
                                 "/app/experiment_dir",
                             ],
                             "env": [

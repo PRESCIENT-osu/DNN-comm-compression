@@ -6,8 +6,15 @@ from typing import Any
 
 import yaml
 
-from framework.config.experiment_schema import ExperimentConfig
-from framework.config.infra_schema import InfraConfig, InfraLinkConfig
+from framework.datamodels.experiment import ExperimentConfig
+from framework.datamodels.infra import InfraConfig, InfraLinkConfig
+
+
+def _compute_node_module(model: str) -> str:
+    """Return the server module path for the given model name."""
+    if model.lower().startswith("llama"):
+        return "framework.nodes.compute.llama.server"
+    return "framework.nodes.compute.resnet.server"
 
 
 def generate(
@@ -53,7 +60,7 @@ def generate(
         "command": [
             "python",
             "-m",
-            "framework.metrics_server.server",
+            "framework.nodes.metrics.server",
             "--host",
             "0.0.0.0",
             "--port",
@@ -68,6 +75,8 @@ def generate(
         "networks": ["pipeline"],
         "restart": "unless-stopped",
     }
+
+    node_module = _compute_node_module(exp.model)
 
     # --- Node services ---
     for node in exp.nodes:
@@ -131,6 +140,7 @@ def generate(
                     }
                 }
 
+        svc["command"] = ["python", "-m", node_module]
         services[node.host] = svc
 
     node_service_names = [node.host for node in exp.nodes]
@@ -140,7 +150,7 @@ def generate(
         "command": [
             "python",
             "-m",
-            "framework.orchestrator.runner",
+            "framework.nodes.orchestrator.runner",
             "/app/experiment_dir",
             "--callback-host",
             "orchestrator",

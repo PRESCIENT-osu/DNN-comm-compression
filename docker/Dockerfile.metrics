@@ -1,0 +1,28 @@
+# Metrics server image.
+# Minimal: only FastAPI + uvicorn.  No torch, no CUDA, no GPU required.
+#
+# Build context: repo root
+#   docker build -f docker/Dockerfile.metrics -t dnn-metrics:latest .
+
+FROM python:3.11-slim
+
+WORKDIR /app
+
+COPY pyproject.toml .
+RUN pip install --no-cache-dir \
+    fastapi \
+    "uvicorn[standard]"
+
+# Only the metrics node package is needed at runtime
+COPY framework/__init__.py ./framework/__init__.py
+COPY framework/nodes/__init__.py ./framework/nodes/__init__.py
+COPY framework/nodes/metrics/ ./framework/nodes/metrics/
+
+ENV PYTHONUNBUFFERED=1
+
+EXPOSE 9100
+
+CMD ["python", "-m", "framework.nodes.metrics.server", \
+     "--host", "0.0.0.0", \
+     "--port", "9100", \
+     "--storage-dir", "/app/metrics_data"]

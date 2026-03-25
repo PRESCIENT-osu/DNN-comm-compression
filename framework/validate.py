@@ -7,7 +7,7 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from framework.config.loader import (
+from framework.utils.loader import (
     check_infra_fairness,
     load_experiment_dir,
     load_infra_config,

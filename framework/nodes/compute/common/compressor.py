@@ -7,7 +7,7 @@ from typing import Any
 import numpy as np
 import torch
 
-from framework.config.experiment_schema import CompressionMethod
+from framework.datamodels.experiment import CompressionMethod
 
 
 class Compressor(ABC):
@@ -60,27 +60,9 @@ class NoCompression(Compressor):
     """
 
     def compress(self, tensor: torch.Tensor, rate: float) -> bytes:
-        """Serialize tensor to bytes with no compression.
-
-        Args:
-            tensor: Activation tensor to serialize.
-            rate: Ignored.
-
-        Returns:
-            Pickled tensor bytes.
-        """
         return pickle.dumps({"tensor": tensor.cpu()})
 
     def decompress(self, data: bytes, device: str) -> torch.Tensor:
-        """Deserialize bytes back to a tensor.
-
-        Args:
-            data: Bytes produced by compress.
-            device: Target device for the tensor.
-
-        Returns:
-            Deserialized tensor on the specified device.
-        """
         return pickle.loads(data)["tensor"].to(device)
 
 
@@ -105,15 +87,6 @@ class TopK(Compressor):
     """
 
     def compress(self, tensor: torch.Tensor, rate: float) -> bytes:
-        """Compress by keeping the top-k% elements per sample.
-
-        Args:
-            tensor: Activation tensor to compress; first dimension is batch.
-            rate: Fraction of elements to retain per sample, in (0, 1].
-
-        Returns:
-            Pickled payload containing values, packed mask, and shape metadata.
-        """
         original_shape = tensor.shape
         batch_size = original_shape[0]
         reshaped = tensor.reshape(batch_size, -1)
@@ -140,15 +113,6 @@ class TopK(Compressor):
         return pickle.dumps(payload)
 
     def decompress(self, data: bytes, device: str) -> torch.Tensor:
-        """Reconstruct a tensor from a per-sample sparse top-k payload.
-
-        Args:
-            data: Bytes produced by compress.
-            device: Target device for the reconstructed tensor.
-
-        Returns:
-            Dense tensor with non-top-k elements set to zero.
-        """
         payload = pickle.loads(data)
         values = torch.from_numpy(payload["values"]).to(device)
         shape = payload["shape"]
@@ -182,15 +146,6 @@ class RandomK(Compressor):
     """
 
     def compress(self, tensor: torch.Tensor, rate: float) -> bytes:
-        """Compress by randomly sampling k% of elements.
-
-        Args:
-            tensor: Activation tensor to compress.
-            rate: Fraction of elements to retain, in (0, 1].
-
-        Returns:
-            Pickled sparse representation (shape, dtype, indices, values).
-        """
         flat = tensor.flatten()
         k = max(1, int(flat.numel() * rate))
         indices = torch.randperm(flat.numel())[:k]
@@ -205,15 +160,6 @@ class RandomK(Compressor):
         return pickle.dumps(payload)
 
     def decompress(self, data: bytes, device: str) -> torch.Tensor:
-        """Reconstruct a tensor from a random-k sparse payload.
-
-        Args:
-            data: Bytes produced by compress.
-            device: Target device for the reconstructed tensor.
-
-        Returns:
-            Dense tensor with non-sampled elements set to zero.
-        """
         payload = pickle.loads(data)
         flat = torch.zeros(payload["numel"], dtype=payload["dtype"])
         indices = torch.from_numpy(payload["indices"])
@@ -303,7 +249,7 @@ class _QuanInt4:
         low = packed & 0x0F
         unpacked = torch.stack([high, low], dim=1).flatten()
         if data["padding"]:
-            unpacked = unpacked[: data["n_elements"]]
+            unpacked = unpacked[: -data["padding"]]
         quantized = unpacked.to(torch.int8) - 7
         return (quantized.float() * data["scale"]).reshape(data["shape"])
 
@@ -347,7 +293,7 @@ class _QuanInt2:
         b3 = packed & 0x03
         unpacked = torch.stack([b0, b1, b2, b3], dim=1).flatten()
         if data["padding"]:
-            unpacked = unpacked[: data["n_elements"]]
+            unpacked = unpacked[: -data["padding"]]
         quantized = unpacked.to(torch.int8) - 1
         return (quantized.float() * data["scale"]).reshape(data["shape"])
 
@@ -357,7 +303,6 @@ class _QuanInt2:
 # ---------------------------------------------------------------------------
 
 _QUAN_VALID_RATES = {0.5, 0.25, 0.125, 0.0625}
-_QUAN_SUB: dict[float, Any] = {}  # populated after class definitions below
 
 
 class Quantization(Compressor):
@@ -406,30 +351,9 @@ class Quantization(Compressor):
         }.get(method_tag, self._fp16)
 
     def compress(self, tensor: torch.Tensor, rate: float) -> bytes:
-        """Compress a tensor by quantizing to the bit-width encoded in rate.
-
-        Args:
-            tensor: Activation tensor to compress.
-            rate: One of {0.5, 0.25, 0.125, 0.0625} selecting FP16/INT8/INT4/INT2.
-
-        Returns:
-            Pickled quantized payload.
-
-        Raises:
-            ValueError: If rate is not one of the four valid values.
-        """
         return pickle.dumps(self._select(rate).compress(tensor))
 
     def decompress(self, data: bytes, device: str) -> torch.Tensor:
-        """Decompress a quantized payload back to a float32 tensor.
-
-        Args:
-            data: Bytes produced by compress.
-            device: Target device for the reconstructed tensor.
-
-        Returns:
-            Reconstructed float32 tensor on the specified device.
-        """
         payload = pickle.loads(data)
         return self._dispatch(payload["method"]).decompress(payload, device)
 
@@ -480,27 +404,15 @@ class LLMInt8(Compressor):
         self._regular_precision = regular_precision
 
     def compress(self, tensor: torch.Tensor, rate: float) -> bytes:
-        """Compress using hybrid mixed-precision quantization.
-
-        Args:
-            tensor: Input FP32 activation tensor of any shape.
-            rate: Outlier ratio — fraction of elements treated as outliers,
-                e.g. ``0.01`` designates the top 1% by magnitude as outliers.
-
-        Returns:
-            Pickled compressed payload dict.
-        """
         if tensor.dtype != torch.float32:
             tensor = tensor.float()
 
         shape = tensor.shape
         numel = tensor.numel()
 
-        # Dynamic threshold at (1 - rate) quantile of |tensor|
         threshold = torch.quantile(tensor.abs().reshape(-1), float(1.0 - rate)).item()
         mask_bool = tensor.abs() > threshold
 
-        # --- Outlier values ---
         outlier_raw = torch.masked_select(tensor, mask_bool)
         outlier_scale: float | None = None
         if self._outlier_precision == "fp16":
@@ -512,7 +424,6 @@ class LLMInt8(Compressor):
                 (outlier_raw / outlier_scale).round().clamp(-127, 127).to(torch.int8)
             )
 
-        # --- Regular values (row-wise AbsMax) ---
         tensor_regular = tensor.clone()
         tensor_regular.masked_fill_(mask_bool, 0.0)
         flattened = tensor_regular.view(-1, shape[-1])
@@ -520,7 +431,7 @@ class LLMInt8(Compressor):
 
         regular_padding = 0
         if self._regular_precision == "fp16":
-            scales = row_abs_max  # unused for fp16 but kept for symmetry
+            scales = row_abs_max
             quantized_regular = flattened.half()
         elif self._regular_precision == "int8":
             scales = row_abs_max / 127.0
@@ -565,7 +476,6 @@ class LLMInt8(Compressor):
                 | shifted[3::4]
             )
 
-        # --- Pack bitmask ---
         mask_np = mask_bool.reshape(-1).cpu().numpy().astype(np.uint8)
         packed_mask = np.packbits(mask_np)
 
@@ -584,26 +494,15 @@ class LLMInt8(Compressor):
         return pickle.dumps(payload)
 
     def decompress(self, data: bytes, device: str) -> torch.Tensor:
-        """Decompress a hybrid mixed-precision payload to a float32 tensor.
-
-        Args:
-            data: Bytes produced by compress.
-            device: Target device for the reconstructed tensor.
-
-        Returns:
-            Restored float32 tensor on the specified device.
-        """
         payload = pickle.loads(data)
         shape = payload["shape"]
         numel = payload["numel"]
         reg_prec = payload["regular_precision"]
         o_prec = payload["outlier_precision"]
 
-        # Unpack bitmask
         mask_flat = np.unpackbits(payload["packed_mask"])[:numel]
         mask = torch.from_numpy(mask_flat.copy()).view(shape).to(device).bool()
 
-        # Dequantize regular values
         main_scales = torch.from_numpy(payload["main_scales"].copy()).to(device).float()
 
         if reg_prec == "fp16":
@@ -639,7 +538,6 @@ class LLMInt8(Compressor):
             quantized = unpacked.to(torch.int8) - 1
             restored = (quantized.float().view(-1, shape[-1]) * main_scales).view(shape)
 
-        # Scatter outliers back
         if payload["outlier_values"].size > 0:
             if o_prec == "fp16":
                 outlier_vals = (

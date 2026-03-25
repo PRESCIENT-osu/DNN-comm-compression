@@ -24,6 +24,10 @@ dependencies = [
     "matplotlib>=3.9.0",
 ]
 
+[project.scripts]
+validate = "framework.validate:main"
+deploy = "framework.deploy.__main__:main"
+
 [project.optional-dependencies]
 dev = [
     "black>=24.4.0",

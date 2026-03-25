@@ -8,7 +8,7 @@ import torch
 import torchvision
 import torchvision.transforms as transforms
 
-from framework.config.experiment_schema import DatasetConfig
+from framework.datamodels.experiment import DatasetConfig
 
 logger = logging.getLogger(__name__)
 

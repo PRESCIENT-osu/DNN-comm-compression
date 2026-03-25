@@ -9,7 +9,7 @@ from framework.analysis._common import (
     compute_accuracy,
     load_records,
 )
-from framework.config.loader import load_experiment_config
+from framework.utils.loader import load_experiment_config
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 logger = logging.getLogger(__name__)

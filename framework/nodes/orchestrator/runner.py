@@ -8,11 +8,11 @@ import os
 from pathlib import Path
 from typing import Any
 
-from framework.config.experiment_schema import ExperimentConfig
-from framework.config.loader import load_experiment_dir
-from framework.node.metrics import MetricsEmitter
-from framework.orchestrator.controller import push_run_config
-from framework.orchestrator.data_client import DataClient
+from framework.datamodels.experiment import ExperimentConfig
+from framework.nodes.metrics.emitter import MetricsEmitter
+from framework.nodes.orchestrator.controller import push_run_config
+from framework.nodes.orchestrator.data_client import DataClient
+from framework.utils.loader import load_experiment_dir
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s"
@@ -121,7 +121,7 @@ def _make_data_client(
         A DataClient or LlamaDataClient instance.
     """
     if exp.model.lower().startswith("llama"):
-        from framework.orchestrator.llama_data_client import LlamaDataClient
+        from framework.nodes.orchestrator.llama_data_client import LlamaDataClient
 
         tokenizer_path = exp.dataset.tokenizer_path or exp.dataset.path
         return LlamaDataClient(  # type: ignore[return-value]
