@@ -9,7 +9,7 @@ Partition layout:
 
 Usage:
   python models/resnet/partition_resnet56.py \\
-    --checkpoint archive/models/resnet/resnet56-4bfd9763.th \\
+    --checkpoint models/resnet/resnet56-4bfd9763.th \\
     --output-dir models/resnet/partitions \\
     [--verify]
 """
@@ -275,7 +275,7 @@ def main() -> None:
     parser.add_argument(
         "--checkpoint",
         type=Path,
-        default=Path("archive/models/resnet/resnet56-4bfd9763.th"),
+        default=Path("models/resnet/resnet56-4bfd9763.th"),
         help="Path to the .th checkpoint file",
     )
     parser.add_argument(

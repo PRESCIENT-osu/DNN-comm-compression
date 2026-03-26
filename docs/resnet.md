@@ -8,6 +8,7 @@ ResNet-56 is split into 5 sequential TorchScript partitions. This is a one-time 
 
 ```bash
 python models/resnet/partition_resnet56.py --verify
+# checkpoint defaults to models/resnet/resnet56-4bfd9763.th
 ```
 
 Output is written to `models/resnet/.partitions/` (gitignored). The `--verify` flag runs a forward pass to confirm partition outputs match the original model.
