@@ -54,7 +54,6 @@ class Cifar10Dataset(Dataset):
                 transforms.Normalize(self._MEAN, self._STD),
             ]
         )
-        print(path)
         self._dataset = torchvision.datasets.CIFAR10(
             root=path, train=False, download=True, transform=transform
         )
@@ -63,7 +62,7 @@ class Cifar10Dataset(Dataset):
             self._dataset,
             batch_size=batch_size,
             shuffle=False,
-            num_workers=2,
+            num_workers=0,
         )
 
     def batches(self) -> Iterator[tuple[int, torch.Tensor, list[int]]]:
