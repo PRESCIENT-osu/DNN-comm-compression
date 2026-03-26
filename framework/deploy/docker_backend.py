@@ -17,6 +17,21 @@ def _compute_node_module(model: str) -> str:
     return "framework.nodes.compute.resnet.server"
 
 
+def _derive_image(compute_image: str, role: str) -> str:
+    """Derive a role-specific image name from the compute image tag.
+
+    E.g. ``_derive_image("dnn-compute-resnet:v0.2", "metrics")`` →
+    ``"dnn-metrics:v0.2"``.
+    """
+    tag = compute_image.split(":")[-1] if ":" in compute_image else "latest"
+    return f"dnn-{role}:{tag}"
+
+
+def _abs_container_path(path: str) -> str:
+    """Return an absolute container path, prepending /app for relative paths."""
+    return path if Path(path).is_absolute() else f"/app/{path}"
+
+
 def generate(
     exp: ExperimentConfig,
     infra: InfraConfig,
@@ -53,10 +68,11 @@ def generate(
     node_host_map = {n.name: n.host for n in exp.nodes}
     services: dict[str, Any] = {}
 
+    dataset_container_path = _abs_container_path(exp.dataset.path)
+
     # --- Metrics server ---
     services["metrics"] = {
-        "image": image,
-        "entrypoint": ["/app/entrypoint.sh"],
+        "image": _derive_image(image, "metrics"),
         "command": [
             "python",
             "-m",
@@ -145,7 +161,7 @@ def generate(
 
     node_service_names = [node.host for node in exp.nodes]
     services["orchestrator"] = {
-        "image": image,
+        "image": _derive_image(image, "orchestrator"),
         "hostname": "orchestrator",
         "command": [
             "python",
@@ -160,7 +176,7 @@ def generate(
         "environment": {"PYTHONUNBUFFERED": "1"},
         "volumes": [
             f"{experiment_config_path.parent.resolve()}:/app/experiment_dir:ro",
-            f"{dataset_dir.resolve()}:{exp.dataset.path}:ro",
+            f"{dataset_dir.resolve()}:{dataset_container_path}",
         ],
         "depends_on": ["metrics"] + node_service_names,
         "networks": ["pipeline"],

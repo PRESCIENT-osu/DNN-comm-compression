@@ -17,6 +17,17 @@ def _compute_node_module(model: str) -> str:
     return "framework.nodes.compute.resnet.server"
 
 
+def _derive_image(compute_image: str, role: str) -> str:
+    """Derive a role-specific image name from the compute image tag."""
+    tag = compute_image.split(":")[-1] if ":" in compute_image else "latest"
+    return f"dnn-{role}:{tag}"
+
+
+def _abs_container_path(path: str) -> str:
+    """Return an absolute container path, prepending /app for relative paths."""
+    return path if Path(path).is_absolute() else f"/app/{path}"
+
+
 def generate(
     exp: ExperimentConfig,
     infra: InfraConfig,
@@ -54,9 +65,12 @@ def generate(
         Multi-document YAML string suitable for ``kubectl apply -f``.
     """
     docs: list[dict[str, Any]] = []
+    metrics_image = _derive_image(image, "metrics")
+    orchestrator_image = _derive_image(image, "orchestrator")
+    dataset_container_path = _abs_container_path(exp.dataset.path)
 
     docs.append(_configmap(exp, experiment_config_path, namespace))
-    docs.append(_metrics_pod(exp, infra, image, metrics_data_dir, namespace))
+    docs.append(_metrics_pod(exp, infra, metrics_image, metrics_data_dir, namespace))
     docs.append(_metrics_service(exp, infra, namespace))
 
     outgoing_links: dict[str, list[InfraLinkConfig]] = defaultdict(list)
@@ -88,9 +102,10 @@ def generate(
         docs.append(
             _orchestrator_job(
                 exp=exp,
-                image=image,
+                image=orchestrator_image,
                 experiment_config_path=experiment_config_path,
                 dataset_dir=dataset_dir,
+                dataset_container_path=dataset_container_path,
                 namespace=namespace,
             )
         )
@@ -325,6 +340,7 @@ def _orchestrator_job(
     image: str,
     experiment_config_path: Path,
     dataset_dir: Path,
+    dataset_container_path: str,
     namespace: str,
 ) -> dict[str, Any]:
     """Generate a Kubernetes Job manifest for the experiment orchestrator.
@@ -338,6 +354,7 @@ def _orchestrator_job(
         image: Docker image name.
         experiment_config_path: Host path to experiment.yaml (parent dir is mounted).
         dataset_dir: Host path to the dataset directory.
+        dataset_container_path: Absolute container path where dataset_dir is mounted.
         namespace: Kubernetes namespace.
 
     Returns:
@@ -381,8 +398,7 @@ def _orchestrator_job(
                                 },
                                 {
                                     "name": "dataset",
-                                    "mountPath": exp.dataset.path,
-                                    "readOnly": True,
+                                    "mountPath": dataset_container_path,
                                 },
                             ],
                         }
