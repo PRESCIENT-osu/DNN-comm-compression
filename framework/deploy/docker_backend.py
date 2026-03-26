@@ -167,7 +167,7 @@ def generate(
             "python",
             "-m",
             "framework.nodes.orchestrator.runner",
-            "/app/experiment_dir",
+            f"/app/experiments/{exp.name}",
             "--callback-host",
             "orchestrator",
             "--callback-port",
@@ -175,7 +175,7 @@ def generate(
         ],
         "environment": {"PYTHONUNBUFFERED": "1"},
         "volumes": [
-            f"{experiment_config_path.parent.resolve()}:/app/experiment_dir:ro",
+            f"{experiment_config_path.parent.parent.resolve()}:/app/experiments:ro",
             f"{dataset_dir.resolve()}:{dataset_container_path}",
         ],
         "depends_on": ["metrics"] + node_service_names,

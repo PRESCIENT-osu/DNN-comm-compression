@@ -352,7 +352,7 @@ def _orchestrator_job(
     Args:
         exp: Experiment configuration.
         image: Docker image name.
-        experiment_config_path: Host path to experiment.yaml (parent dir is mounted).
+        experiment_config_path: Host path to experiment.yaml (grandparent experiments/ dir is mounted).
         dataset_dir: Host path to the dataset directory.
         dataset_container_path: Absolute container path where dataset_dir is mounted.
         namespace: Kubernetes namespace.
@@ -378,7 +378,7 @@ def _orchestrator_job(
                                 "python",
                                 "-m",
                                 "framework.nodes.orchestrator.runner",
-                                "/app/experiment_dir",
+                                f"/app/experiments/{exp.name}",
                             ],
                             "env": [
                                 {
@@ -393,7 +393,7 @@ def _orchestrator_job(
                             "volumeMounts": [
                                 {
                                     "name": "experiment-dir",
-                                    "mountPath": "/app/experiment_dir",
+                                    "mountPath": "/app/experiments",
                                     "readOnly": True,
                                 },
                                 {
@@ -407,7 +407,9 @@ def _orchestrator_job(
                         {
                             "name": "experiment-dir",
                             "hostPath": {
-                                "path": str(experiment_config_path.parent.resolve())
+                                "path": str(
+                                    experiment_config_path.parent.parent.resolve()
+                                )
                             },
                         },
                         {
