@@ -1,0 +1,5 @@
+nodes:
+  - name: A
+    host: node-a
+    port: 8000
+    partitions: [p1, p2, p3, p4, p5]

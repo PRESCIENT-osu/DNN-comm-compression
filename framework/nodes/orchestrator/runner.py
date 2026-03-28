@@ -9,10 +9,15 @@ from pathlib import Path
 from typing import Any
 
 from framework.datamodels.experiment import ExperimentConfig
+from framework.datamodels.spec import GeneratedExperimentConfig, ResolvedSubExperiment
 from framework.nodes.metrics.emitter import MetricsEmitter
 from framework.nodes.orchestrator.controller import push_run_config
 from framework.nodes.orchestrator.data_client import DataClient
-from framework.utils.loader import load_experiment_dir
+from framework.utils.loader import (
+    is_generated_experiment,
+    load_experiment_dir,
+    load_generated_experiment_config,
+)
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s"
@@ -29,7 +34,11 @@ async def run_experiment(
     node_host: str | None = None,
     metrics_host: str | None = None,
 ) -> None:
-    """Load and execute a full experiment sweep.
+    """Load and execute a full experiment, handling both legacy and generated formats.
+
+    For generated experiments (produced by tools/generate.py) each
+    sub-experiment is executed sequentially.  For legacy experiments a single
+    sweep is executed.
 
     For each resolved sweep run:
       1. Push compression configs to all relevant nodes.
@@ -48,22 +57,147 @@ async def run_experiment(
         metrics_host: Override hostname used to reach the metrics server.
             Defaults to ``exp.metrics_server.host``.
     """
-    exp, _ = load_experiment_dir(experiment_dir)
+    exp_yaml = experiment_dir / "experiment.yaml"
 
-    logger.info("Experiment: %s  model: %s", exp.name, exp.model)
+    if is_generated_experiment(exp_yaml):
+        generated = load_generated_experiment_config(exp_yaml)
+        logger.info(
+            "Experiment: %s  model: %s  sub-experiments: %d",
+            generated.name,
+            generated.model,
+            len(generated.sub_experiments),
+        )
+
+        resolved_metrics_host = metrics_host or generated.metrics_server.host
+        metrics_url = f"http://{resolved_metrics_host}:{generated.metrics_server.port}"
+        emitter = MetricsEmitter(server_url=metrics_url)
+        await emitter.start()
+
+        for sub_exp in generated.sub_experiments:
+            exp = _sub_experiment_to_exp_config(generated, sub_exp)
+            _warn_missing_baselines(sub_exp.baselines)
+            await _run_sweep(
+                exp=exp,
+                sub_experiment_name=sub_exp.name,
+                callback_host=callback_host,
+                callback_port=callback_port,
+                result_timeout_s=result_timeout_s,
+                dry_run=dry_run,
+                node_host=node_host,
+                emitter=emitter,
+            )
+
+        await emitter.stop()
+        logger.info("Experiment '%s' complete", generated.name)
+
+    else:
+        # Legacy format — single sweep
+        exp, _ = load_experiment_dir(experiment_dir)
+
+        resolved_metrics_host = metrics_host or exp.metrics_server.host
+        metrics_url = f"http://{resolved_metrics_host}:{exp.metrics_server.port}"
+        emitter = MetricsEmitter(server_url=metrics_url)
+        await emitter.start()
+
+        await _run_sweep(
+            exp=exp,
+            sub_experiment_name=None,
+            callback_host=callback_host,
+            callback_port=callback_port,
+            result_timeout_s=result_timeout_s,
+            dry_run=dry_run,
+            node_host=node_host,
+            emitter=emitter,
+        )
+
+        await emitter.stop()
+        logger.info("Experiment '%s' complete", exp.name)
+
+
+def _sub_experiment_to_exp_config(
+    generated: GeneratedExperimentConfig,
+    sub_exp: ResolvedSubExperiment,
+) -> ExperimentConfig:
+    """Build an ExperimentConfig from shared generated fields + one sub-experiment.
+
+    The sub-experiment's dataset overrides the shared dataset when present
+    (used by Llama experiments that vary dataset across sub-experiments).
+
+    Args:
+        generated: The top-level generated experiment config.
+        sub_exp: The resolved sub-experiment entry to execute.
+
+    Returns:
+        A valid ExperimentConfig ready for sweep resolution.
+    """
+    return ExperimentConfig(
+        name=generated.name,
+        model=generated.model,
+        nodes=generated.nodes,
+        links=sub_exp.links,
+        sweep=sub_exp.sweep,
+        sweep_mode=sub_exp.sweep_mode,
+        dataset=sub_exp.dataset or generated.dataset,
+        metrics_server=generated.metrics_server,
+        baselines=sub_exp.baselines,
+    )
+
+
+def _warn_missing_baselines(baselines: list[str]) -> None:
+    """Log a warning for each baseline that has no metrics data on disk.
+
+    Args:
+        baselines: List of 'experiment_name/sub_experiment_name' strings.
+    """
+    metrics_root = Path("metrics_data")
+    for ref in baselines:
+        exp_name = ref.split("/")[0]
+        result_path = metrics_root / exp_name / "result.ndjson"
+        if not result_path.exists():
+            logger.warning(
+                "Baseline '%s' has no metrics data at %s — "
+                "run the baseline experiment first for accurate analysis",
+                ref,
+                result_path,
+            )
+
+
+async def _run_sweep(
+    exp: ExperimentConfig,
+    sub_experiment_name: str | None,
+    callback_host: str,
+    callback_port: int,
+    result_timeout_s: float,
+    dry_run: bool,
+    node_host: str | None,
+    emitter: MetricsEmitter,
+) -> None:
+    """Execute the sweep for one ExperimentConfig.
+
+    Args:
+        exp: Fully resolved experiment config for this sweep.
+        sub_experiment_name: Sub-experiment label for logging, or None for legacy.
+        callback_host: Hostname pipeline nodes use to reach the result callback.
+        callback_port: Port for the orchestrator's callback server.
+        result_timeout_s: Per-batch result wait timeout in seconds.
+        dry_run: If True, log the sweep plan without executing.
+        node_host: Optional node hostname override.
+        emitter: Shared metrics emitter (already started).
+    """
+    label = f"[{sub_experiment_name}] " if sub_experiment_name else ""
 
     runs = exp.resolve_sweep()
-    logger.info("Sweep: %d run(s)", len(runs))
+    logger.info("%sSweep: %d run(s)", label, len(runs))
     for run in runs:
         link_summary = ", ".join(
             f"{lk.from_node}→{lk.to_node} {lk.compression.value}"
             + (f"@{lk.rate:.2f}" if lk.compression.value != "none" else "")
             for lk in run.links
         )
-        logger.info("  [%s] %s", run.run_id, link_summary or "no links")
+        logger.info("  %s[%s] %s", label, run.run_id, link_summary or "no links")
 
     if dry_run:
-        logger.info("Dry run — exiting without executing")
+        logger.info("%sDry run — skipping execution", label)
         return
 
     order = exp.node_order()
@@ -71,21 +205,16 @@ async def run_experiment(
     resolved_host = node_host or first_node.host
     first_node_url = f"http://{resolved_host}:{first_node.port}/infer"
 
-    resolved_metrics_host = metrics_host or exp.metrics_server.host
-    metrics_url = f"http://{resolved_metrics_host}:{exp.metrics_server.port}"
-    emitter = MetricsEmitter(server_url=metrics_url)
-    await emitter.start()
-
     client = _make_data_client(exp, callback_host, callback_port, result_timeout_s)
 
     async with client.session():
         for run in runs:
-            logger.info("Starting run: %s", run.run_id)
+            logger.info("%sStarting run: %s", label, run.run_id)
 
             if run.links:
                 await push_run_config(exp, run, node_host=node_host)
             else:
-                logger.info("No links to configure for run '%s'", run.run_id)
+                logger.info("%sNo links to configure for run '%s'", label, run.run_id)
 
             records = await client.run(
                 exp=exp,
@@ -97,10 +226,7 @@ async def run_experiment(
             if records:
                 _log_run_summary(run.run_id, records)
             else:
-                logger.warning("Run '%s' produced no results", run.run_id)
-
-    await emitter.stop()
-    logger.info("Experiment '%s' complete", exp.name)
+                logger.warning("%sRun '%s' produced no results", label, run.run_id)
 
 
 def _make_data_client(

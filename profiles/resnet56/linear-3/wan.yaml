@@ -1,0 +1,27 @@
+nodes:
+  - name: A
+    resources:
+      cpu: 2.0
+      memory: "4Gi"
+  - name: B
+    resources:
+      cpu: 4.0
+      memory: "8Gi"
+      gpu: 1
+  - name: C
+    resources:
+      cpu: 2.0
+      memory: "4Gi"
+links:
+  - from: A
+    to: B
+    bandwidth_mbps: 50
+    delay_ms: 20
+    jitter_ms: 5
+    loss_pct: 0.5
+  - from: B
+    to: C
+    bandwidth_mbps: 100
+    delay_ms: 5
+    jitter_ms: 1
+    loss_pct: 0.1

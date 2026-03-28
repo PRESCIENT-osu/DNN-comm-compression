@@ -1,0 +1,13 @@
+nodes:
+  - name: A
+    host: node-a
+    port: 8000
+    partitions: [p1]
+  - name: B
+    host: node-b
+    port: 8001
+    partitions: [p2, p3, p4]
+  - name: C
+    host: node-c
+    port: 8002
+    partitions: [p5]

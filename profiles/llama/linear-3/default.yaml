@@ -1,0 +1,11 @@
+nodes:
+  - name: early
+  - name: middle
+  - name: late
+links:
+  - from: early
+    to: middle
+    bandwidth_mbps: 1000
+  - from: middle
+    to: late
+    bandwidth_mbps: 1000

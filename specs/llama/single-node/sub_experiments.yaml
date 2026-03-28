@@ -1,0 +1,28 @@
+sub_experiments:
+
+  baseline_mmlu:
+    dataset:
+      name: mmlu
+      path: models/llama/.partitions/tokenizer
+      tokenizer_path: models/llama/.partitions/tokenizer
+      batch_size: 4
+      max_in_flight: 4
+      subjects:
+        - college_computer_science
+        - high_school_mathematics
+        - professional_law
+        - global_facts
+        - miscellaneous
+        - business_ethics
+      samples_per_subject: 50
+    links: []
+
+  baseline_wikitext:
+    dataset:
+      name: wikitext2
+      path: models/llama/.partitions/tokenizer
+      tokenizer_path: models/llama/.partitions/tokenizer
+      batch_size: 2
+      max_in_flight: 2
+      max_seq_len: 512
+    links: []

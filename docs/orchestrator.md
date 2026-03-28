@@ -14,6 +14,8 @@ The orchestrator drives experiment sweeps as a containerised service. It coordin
 
 ## Sweep Loop
 
+For generated experiments (produced by `tools/generate.py`), the runner iterates sub-experiments sequentially. Each sub-experiment resolves its own sweep and runs all its runs before moving to the next sub-experiment. All sub-experiment runs write to the same metrics directory (`metrics_data/<experiment_name>/`), differentiated by run ID.
+
 For each resolved run:
 
 1. **Push config** — controller sends `POST /config` to the sending and receiving node of each link concurrently. Each node drains in-flight requests before applying.
@@ -63,9 +65,9 @@ Results are stored exclusively in the metrics server as `ResultEvent` events at 
 ```json
 {
   "event_type": "result",
-  "experiment_id": "resnet56_topk_sweep",
-  "run_id": "e1_topk_0.10",
-  "request_id": "e1_topk_0.10_3_abc123",
+  "experiment_id": "resnet56_equal-split_linear-3_100mbps",
+  "run_id": "topk-A-B_0.10--topk-B-C_0.10",
+  "request_id": "topk-A-B_0.10--topk-B-C_0.10_3_abc123",
   "predicted": [3, 7, 2, 5],
   "actual": [3, 7, 2, 1],
   "timestamp": 1234567890.0

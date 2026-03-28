@@ -1,0 +1,5 @@
+nodes:
+  - name: single
+    host: llama-single
+    port: 8000
+    partitions: [p1, p2, p3]

@@ -1,0 +1,46 @@
+sub_experiments:
+
+  baseline:
+    links:
+      - from: A
+        to: B
+        compression: none
+      - from: B
+        to: C
+        compression: none
+
+  topk_paired:
+    baselines:
+      - sub_experiment: baseline
+      - spec: resnet56/single-node
+        sub_experiment: baseline
+        profile: resnet56/single-node/default
+    sweep_mode: paired
+    sweep:
+      - links:
+          - from: A
+            to: B
+            compression: topk
+            rates: [0.1, 0.3, 0.5]
+          - from: B
+            to: C
+            compression: topk
+            rates: [0.1, 0.3, 0.5]
+
+  topk_product:
+    baselines:
+      - sub_experiment: baseline
+      - spec: resnet56/single-node
+        sub_experiment: baseline
+        profile: resnet56/single-node/default
+    sweep_mode: product
+    sweep:
+      - links:
+          - from: A
+            to: B
+            compression: topk
+            rates: [0.1, 0.25, 0.5, 0.75, 1.0]
+          - from: B
+            to: C
+            compression: topk
+            rates: [0.1, 0.25, 0.5, 0.75, 1.0]

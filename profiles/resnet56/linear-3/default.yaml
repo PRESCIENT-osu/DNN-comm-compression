@@ -1,0 +1,11 @@
+nodes:
+  - name: A
+  - name: B
+  - name: C
+links:
+  - from: A
+    to: B
+    bandwidth_mbps: 1000
+  - from: B
+    to: C
+    bandwidth_mbps: 1000

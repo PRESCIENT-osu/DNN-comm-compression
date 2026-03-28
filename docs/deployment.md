@@ -47,9 +47,17 @@ The metrics and orchestrator images do not include `entrypoint.sh` — they are 
 
 ## Generating Manifests
 
+Generate the experiment directory first using `tools/generate.py` (see [docs/config.md](config.md#generating-experiments)), then deploy it:
+
 ```bash
+# 1. Generate the experiment
+python tools/generate.py \
+    --spec resnet56/equal-split \
+    --profile resnet56/linear-3/100mbps
+
+# 2. Deploy the generated experiment
 python -m framework.deploy \
-  --experiment experiments/resnet56_topk_sweep \
+  --experiment experiments/resnet56_equal-split_linear-3_100mbps \
   --target docker|k8s \
   --partitions-dir models/resnet/.partitions \
   --dataset-dir .datasets/cifar10 \
@@ -88,18 +96,18 @@ Each outgoing link gets its own HTB class and filter, so traffic to different do
 **Orchestrator**: runs as a service in the compose network. It connects to nodes and the metrics server by their hostnames. Results are streamed to the metrics server as `ResultEvent`s — no local file writes. Monitor with:
 
 ```bash
-docker compose -f experiments/resnet56_topk_sweep/deploy/docker-compose.yml logs -f orchestrator
+docker compose -f experiments/resnet56_equal-split_linear-3_100mbps/deploy/docker-compose.yml logs -f orchestrator
 ```
 
 **Running**:
 ```bash
 # From the experiment deploy directory
-cd experiments/resnet56_topk_sweep/deploy
+cd experiments/resnet56_equal-split_linear-3_100mbps/deploy
 docker compose up -d
 
 # Or via the deploy tool with --apply
 python -m framework.deploy \
-  --experiment experiments/resnet56_topk_sweep \
+  --experiment experiments/resnet56_equal-split_linear-3_100mbps \
   --target docker \
   --partitions-dir models/resnet/.partitions \
   --dataset-dir .datasets/cifar10 \
@@ -129,22 +137,22 @@ kubectl logs -f job/<experiment-name>-orchestrator
 **Applying**:
 ```bash
 python -m framework.deploy \
-  --experiment experiments/resnet56_topk_sweep \
+  --experiment experiments/resnet56_equal-split_linear-3_100mbps \
   --target k8s \
   --partitions-dir /path/on/server/to/partitions \
   --dataset-dir /path/on/server/to/datasets/cifar10 \
   --apply
 
 # Or manually
-kubectl apply -f experiments/resnet56_topk_sweep/deploy/manifests.yaml
+kubectl apply -f experiments/resnet56_equal-split_linear-3_100mbps/deploy/manifests.yaml
 ```
 
 ## Infra Config Inheritance
 
-Child infra configs can inherit from a base and override specific nodes or links:
+The `infra.yaml` in a generated experiment directory is the profile verbatim. For hand-written legacy experiments, infra configs can still inherit from a base and override specific nodes or links:
 
 ```yaml
-# experiments/resnet56_bandwidth_test/infra.yaml
+# experiments/my_legacy_experiment/infra.yaml
 inherits: ../base/resnet56_infra.yaml
 
 links:
@@ -157,7 +165,7 @@ links:
     bandwidth_mbps: 10
 ```
 
-The deploy tool resolves inheritance before generating manifests. Run `make validate` to check configs before deploying.
+In the new workflow, network and resource variations are expressed as separate profiles (e.g. `profiles/resnet56/linear-3/100mbps.yaml`, `profiles/resnet56/linear-3/wan.yaml`) and selected at generation time via `tools/generate.py --profile`. The deploy tool resolves infra inheritance before generating manifests. Run `make validate` to check configs before deploying.
 
 ## Node Ports Convention
 

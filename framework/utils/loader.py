@@ -8,8 +8,43 @@ import yaml
 
 from framework.datamodels.experiment import ExperimentConfig
 from framework.datamodels.infra import InfraConfig
+from framework.datamodels.spec import GeneratedExperimentConfig
 
 logger = logging.getLogger(__name__)
+
+
+def is_generated_experiment(path: Path) -> bool:
+    """Return True if the experiment YAML is the new generated format.
+
+    The generated format (produced by tools/generate.py) has a
+    ``sub_experiments`` key at the top level.  The legacy format has
+    ``sweep`` or ``links`` at the top level (or nested under an
+    ``experiment`` key).
+
+    Args:
+        path: Path to the experiment YAML file.
+
+    Returns:
+        True if the file uses the generated format.
+    """
+    with open(path) as f:
+        data = yaml.safe_load(f) or {}
+    raw = data.get("experiment", data)
+    return "sub_experiments" in raw
+
+
+def load_generated_experiment_config(path: Path) -> GeneratedExperimentConfig:
+    """Load a generated experiment config (new format with sub_experiments).
+
+    Args:
+        path: Path to the experiment YAML file.
+
+    Returns:
+        Validated GeneratedExperimentConfig instance.
+    """
+    with open(path) as f:
+        data = yaml.safe_load(f)
+    return GeneratedExperimentConfig.model_validate(data)
 
 
 def load_experiment_config(path: Path) -> ExperimentConfig:
