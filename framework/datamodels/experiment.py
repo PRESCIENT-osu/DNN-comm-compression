@@ -240,16 +240,52 @@ class ExperimentConfig(BaseModel):
             List of ResolvedRun instances, one per concrete experiment run.
         """
         if not self.sweep:
-            return [self._run_from_links(self.links, run_id="default")]
+            return [self._run_from_links(self.links)]
         resolved: list[ResolvedRun] = []
         for idx, entry in enumerate(self.sweep):
             if self.sweep_mode == SweepMode.PAIRED:
                 resolved.extend(self._expand_paired(idx, entry))
             else:
-                resolved.extend(self._expand_product(idx, entry))
+                resolved.extend(self._expand_product(entry))
         return resolved
 
-    def _run_from_links(self, links: list[LinkConfig], run_id: str) -> ResolvedRun:
+    @staticmethod
+    def _make_run_id(links: list[ResolvedLinkConfig]) -> str:
+        """Build a self-describing run_id from a list of resolved link configs.
+
+        Each link contributes one descriptor of the form
+        ``{method}-{from}-{to}_{param}`` where param is:
+
+        - ``{rate:.2f}`` for topk / randomk / quantization
+        - ``{outlier_precision}-{regular_precision}`` for llmint8
+        - omitted for none
+
+        Descriptors are sorted by (from_node, to_node) and joined with ``--``
+        so links are unambiguously delimited regardless of topology shape.
+
+        Examples::
+
+            topk-A-B_0.10--topk-B-C_0.30
+            topk-A-B_0.10--quantization-B-C_0.25
+            llmint8-A-B_fp16-int8--none-B-C
+            none-A-B--none-B-C
+        """
+        parts: list[str] = []
+        for lk in sorted(links, key=lambda a: (a.from_node, a.to_node)):
+            if lk.compression == CompressionMethod.NONE:
+                parts.append(f"none-{lk.from_node}-{lk.to_node}")
+            elif lk.compression == CompressionMethod.LLMINT8:
+                parts.append(
+                    f"llmint8-{lk.from_node}-{lk.to_node}"
+                    f"_{lk.outlier_precision}-{lk.regular_precision}"
+                )
+            else:
+                parts.append(
+                    f"{lk.compression.value}-{lk.from_node}-{lk.to_node}_{lk.rate:.2f}"
+                )
+        return "--".join(parts) if parts else "single-node"
+
+    def _run_from_links(self, links: list[LinkConfig]) -> ResolvedRun:
         resolved_links = [
             ResolvedLinkConfig(
                 from_node=lk.from_node,
@@ -261,7 +297,9 @@ class ExperimentConfig(BaseModel):
             )
             for lk in links
         ]
-        return ResolvedRun(run_id=run_id, links=resolved_links)
+        return ResolvedRun(
+            run_id=self._make_run_id(resolved_links), links=resolved_links
+        )
 
     def _expand_paired(self, entry_idx: int, entry: SweepEntry) -> list[ResolvedRun]:
         rates_per_link = [lk.effective_rates() for lk in entry.links]
@@ -285,16 +323,17 @@ class ExperimentConfig(BaseModel):
                 )
                 for i, lk in enumerate(entry.links)
             ]
-            method = entry.links[0].compression.value if entry.links else "none"
-            rate_val = rates_per_link[0][rate_idx] if rates_per_link else 0.0
-            run_id = f"e{entry_idx}_{method}_{rate_val:.2f}"
-            runs.append(ResolvedRun(run_id=run_id, links=resolved_links))
+            runs.append(
+                ResolvedRun(
+                    run_id=self._make_run_id(resolved_links), links=resolved_links
+                )
+            )
         return runs
 
-    def _expand_product(self, entry_idx: int, entry: SweepEntry) -> list[ResolvedRun]:
+    def _expand_product(self, entry: SweepEntry) -> list[ResolvedRun]:
         rates_per_link = [lk.effective_rates() for lk in entry.links]
         runs = []
-        for combo_idx, rate_combo in enumerate(itertools.product(*rates_per_link)):
+        for rate_combo in itertools.product(*rates_per_link):
             resolved_links = [
                 ResolvedLinkConfig(
                     from_node=lk.from_node,
@@ -306,6 +345,9 @@ class ExperimentConfig(BaseModel):
                 )
                 for i, lk in enumerate(entry.links)
             ]
-            run_id = f"e{entry_idx}_combo{combo_idx}"
-            runs.append(ResolvedRun(run_id=run_id, links=resolved_links))
+            runs.append(
+                ResolvedRun(
+                    run_id=self._make_run_id(resolved_links), links=resolved_links
+                )
+            )
         return runs
