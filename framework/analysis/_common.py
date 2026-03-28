@@ -149,3 +149,57 @@ def aggregate_metrics(
         }
         for run_id, data in runs.items()
     }
+
+
+def load_raw_end_to_end(
+    metrics_dir: Path, experiment_id: str
+) -> dict[str, list[float]]:
+    """Load raw per-batch end-to-end latencies grouped by run_id.
+
+    Unlike :func:`aggregate_metrics`, this returns the full list of
+    per-batch values so callers can compute distributions (CDF, percentiles).
+
+    Args:
+        metrics_dir: Root metrics directory.
+        experiment_id: Experiment name used as subdirectory within metrics_dir.
+
+    Returns:
+        Mapping of run_id to list of per-batch duration_ms values.
+    """
+    path = metrics_dir / experiment_id / "end_to_end.ndjson"
+    run_latencies: dict[str, list[float]] = {}
+    for ev in load_ndjson(path):
+        run_id = ev.get("run_id")
+        if run_id is None:
+            continue
+        run_latencies.setdefault(run_id, []).append(ev["duration_ms"])
+    return run_latencies
+
+
+def compute_per_class_accuracy(
+    records: list[dict[str, Any]], n_classes: int
+) -> dict[int, float | None]:
+    """Compute per-class top-1 accuracy from inference records.
+
+    Args:
+        records: List of record dicts with ``ground_truth`` and ``predicted`` lists.
+        n_classes: Total number of classes.
+
+    Returns:
+        Mapping of class index to accuracy in [0, 1], or None if no samples
+        for that class were seen.
+    """
+    correct: list[int] = [0] * n_classes
+    total: list[int] = [0] * n_classes
+    for r in records:
+        for gt, pred in zip(
+            r.get("ground_truth", []), r.get("predicted", []), strict=False
+        ):
+            if isinstance(gt, int) and 0 <= gt < n_classes:
+                total[gt] += 1
+                if gt == pred:
+                    correct[gt] += 1
+    return {
+        cls: (correct[cls] / total[cls] if total[cls] > 0 else None)
+        for cls in range(n_classes)
+    }

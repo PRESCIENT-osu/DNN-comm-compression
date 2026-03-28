@@ -52,49 +52,67 @@ def analyze(
         )
 
     baseline_accuracies: dict[str, float | None] = {}
-    for baseline_name in exp.baselines:
+    baseline_per_run: dict[str, dict[str, float | None]] = {}
+    for baseline_name in dict.fromkeys(exp.baselines):  # deduplicate, preserve order
         bl_records = load_records(metrics_dir, baseline_name)
         if bl_records:
             all_records = [r for recs in bl_records.values() for r in recs]
             baseline_accuracies[baseline_name] = compute_accuracy(all_records)
+            baseline_per_run[baseline_name] = {
+                rid: compute_accuracy(recs) for rid, recs in bl_records.items()
+            }
         else:
             baseline_accuracies[baseline_name] = None
+            baseline_per_run[baseline_name] = {}
 
     runs = exp.resolve_sweep()
     run_map = {r.run_id: r for r in runs}
 
-    # ------------------------------------------------------------------ #
-    # Accuracy table
-    # ------------------------------------------------------------------ #
-    acc_headers = ["run_id", "compression", "rate", "accuracy"]
-    acc_headers += list(baseline_accuracies.keys())
-    acc_rows = []
-    for run_id, records in sorted(run_records.items()):
-        accuracy = compute_accuracy(records)
-        resolved = run_map.get(run_id)
-        if resolved and resolved.links:
-            methods = "+".join(lk.compression.value for lk in resolved.links)
-            rates = "+".join(f"{lk.rate:.2f}" for lk in resolved.links)
+    def _sort_key(run_id: str) -> tuple[float, ...]:
+        run = run_map.get(run_id)
+        if run and run.links:
+            return tuple(lk.rate for lk in run.links)
+        return (0.0,)
+
+    def _compression_rate(run_id: str) -> tuple[str, str]:
+        run = run_map.get(run_id)
+        if run and run.links:
+            methods = "+".join(lk.compression.value for lk in run.links)
+            rates = "+".join(f"{lk.rate:.2f}" for lk in run.links)
         else:
             methods = "none"
             rates = "-"
+        return methods, rates
+
+    # ------------------------------------------------------------------ #
+    # Accuracy table
+    # ------------------------------------------------------------------ #
+    acc_headers = ["compression", "rate", "accuracy"]
+    acc_headers += list(baseline_accuracies.keys())
+    acc_rows = []
+    for run_id, records in sorted(run_records.items(), key=lambda kv: _sort_key(kv[0])):
+        accuracy = compute_accuracy(records)
+        methods, rates = _compression_rate(run_id)
         row = [
-            run_id,
             methods,
             rates,
             f"{accuracy * 100:.2f}%" if accuracy is not None else "-",
         ]
-        for bl_acc in baseline_accuracies.values():
-            row.append(f"{bl_acc * 100:.2f}%" if bl_acc is not None else "N/A")
+        for bl_name, bl_acc in baseline_accuracies.items():
+            per_run = baseline_per_run.get(bl_name, {})
+            cell = per_run.get(run_id, bl_acc)
+            row.append(f"{cell * 100:.2f}%" if cell is not None else "N/A")
         acc_rows.append(row)
 
-    _print_table(acc_headers, acc_rows, f"Accuracy — {experiment_name}")
+    if acc_rows:
+        _print_table(acc_headers, acc_rows, f"Accuracy — {experiment_name}")
 
     # ------------------------------------------------------------------ #
     # Latency breakdown table
     # ------------------------------------------------------------------ #
     lat_headers = [
-        "run_id",
+        "compression",
+        "rate",
         "forward_ms",
         "compress_ms",
         "decompress_ms",
@@ -103,14 +121,14 @@ def analyze(
     ]
     lat_rows = [
         [
-            run_id,
+            *_compression_rate(run_id),
             _fmt(m["forward_ms"]),
             _fmt(m["compress_ms"]),
             _fmt(m["decompress_ms"]),
             _fmt(m["send_ms"]),
             _fmt(m["end_to_end_ms"]),
         ]
-        for run_id, m in sorted(metrics.items())
+        for run_id, m in sorted(metrics.items(), key=lambda kv: _sort_key(kv[0]))
     ]
     if lat_rows:
         _print_table(
@@ -122,16 +140,27 @@ def analyze(
     # ------------------------------------------------------------------ #
     # Activation size table
     # ------------------------------------------------------------------ #
-    size_headers = ["run_id", "input_bytes", "output_bytes", "compression_ratio"]
+    size_headers = [
+        "compression",
+        "rate",
+        "input_bytes",
+        "output_bytes",
+        "compression_ratio",
+    ]
     size_rows = []
-    for run_id, m in sorted(metrics.items()):
+    for run_id, m in sorted(metrics.items(), key=lambda kv: _sort_key(kv[0])):
         if m["input_bytes"] is None:
             continue
         in_b = m["input_bytes"]
         out_b = m["output_bytes"]
         ratio = f"{in_b / out_b:.2f}x" if out_b is not None and out_b > 0 else "-"
         size_rows.append(
-            [run_id, f"{in_b:.0f}", f"{out_b:.0f}" if out_b is not None else "-", ratio]
+            [
+                *_compression_rate(run_id),
+                f"{in_b:.0f}",
+                f"{out_b:.0f}" if out_b is not None else "-",
+                ratio,
+            ]
         )
     if size_rows:
         _print_table(size_headers, size_rows, f"Activation Sizes — {experiment_name}")
