@@ -6,14 +6,22 @@ Referenced baseline experiments are materialised recursively.
 
 Usage::
 
+    # Single experiment
     python tools/generate.py \\
         --spec specs/resnet56/equal-split \\
         --profile profiles/linear-3/100mbps.yaml
 
+    # Single experiment, specific sub-experiments only
     python tools/generate.py \\
         --spec specs/resnet56/equal-split \\
         --profile profiles/linear-3/100mbps.yaml \\
         --sub-experiments baseline topk_paired
+
+    # All compatible spec/profile combinations
+    python tools/generate.py --all
+
+    # All combinations with validation and run listing
+    python tools/generate.py --all --validate --show-runs
 
 Output is written to experiments/<name>/ which should be gitignored.
 """
@@ -330,6 +338,71 @@ def _materialise(
 
 
 # ---------------------------------------------------------------------------
+# Generate-all helpers
+# ---------------------------------------------------------------------------
+
+
+def _leaf_specs() -> list[Path]:
+    """Return all spec directories whose merged config defines nodes.
+
+    A spec directory is a runnable target when the fully merged experiment
+    config (walking root→leaf) contains a non-empty ``nodes`` list.  This
+    filters out model-level directories that only define shared defaults.
+    """
+    candidates = sorted(p.parent for p in SPECS_DIR.rglob("experiment.yaml"))
+    return [p for p in candidates if load_spec(p).get("nodes")]
+
+
+def _generate_all(
+    output_dir: Path,
+    sub_experiment_filter: list[str] | None = None,
+) -> list[Path]:
+    """Generate experiments for all compatible spec/profile pairs.
+
+    Skips incompatible combinations (node name mismatches) silently.
+
+    Args:
+        output_dir: Root directory for generated experiments.
+        sub_experiment_filter: If set, include only these sub-experiment names.
+
+    Returns:
+        List of generated experiment directory paths.
+    """
+    specs = _leaf_specs()
+    profiles = sorted(PROFILES_DIR.rglob("*.yaml"))
+
+    logger.info(
+        "Found %d runnable spec(s) and %d profile(s) — trying %d combination(s)",
+        len(specs),
+        len(profiles),
+        len(specs) * len(profiles),
+    )
+
+    generated: list[Path] = []
+    skipped = 0
+
+    for spec in specs:
+        for profile in profiles:
+            try:
+                exp_dir = _materialise(spec, profile, output_dir, sub_experiment_filter)
+                generated.append(exp_dir)
+            except ValueError as e:
+                if "Node name mismatch" in str(e) or "No sub_experiments" in str(e):
+                    skipped += 1
+                else:
+                    logger.error("Failed %s + %s: %s", spec, profile, e)
+            except FileNotFoundError as e:
+                logger.error("Failed %s + %s: %s", spec, profile, e)
+
+    logger.info(
+        "Generated %d experiment(s), skipped %d incompatible combination(s)",
+        len(generated),
+        skipped,
+    )
+    return generated
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -337,20 +410,24 @@ def _materialise(
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
-            "Generate a fully resolved experiment directory from a spec and profile. "
-            "All sub-experiments in the spec are included by default."
+            "Generate fully resolved experiment directories from specs and profiles. "
+            "Use --spec/--profile for a single experiment or --all for every "
+            "compatible combination."
         )
+    )
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help="Generate all compatible spec/profile combinations",
     )
     parser.add_argument(
         "--spec",
         type=Path,
-        required=True,
         help="Path to the spec directory (e.g. specs/resnet56/equal-split)",
     )
     parser.add_argument(
         "--profile",
         type=Path,
-        required=True,
         help="Path to the profile YAML file (e.g. profiles/linear-3/100mbps.yaml)",
     )
     parser.add_argument(
@@ -365,19 +442,58 @@ def main() -> None:
         default=EXPERIMENTS_DIR,
         help=f"Root output directory (default: {EXPERIMENTS_DIR})",
     )
+    parser.add_argument(
+        "--validate",
+        action="store_true",
+        help="Validate each generated experiment after generation",
+    )
+    parser.add_argument(
+        "--show-runs",
+        action="store_true",
+        help="Print resolved sweep runs during validation (implies --validate)",
+    )
     args = parser.parse_args()
 
-    try:
-        exp_dir = _materialise(
-            spec_dir=args.spec,
-            profile_file=args.profile,
-            output_dir=args.output_dir,
-            sub_experiment_filter=args.sub_experiments,
-        )
-        print(exp_dir)
-    except (FileNotFoundError, ValueError) as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
+    if args.show_runs:
+        args.validate = True
+
+    if args.all and (args.spec or args.profile):
+        print("ERROR: --all cannot be used with --spec or --profile", file=sys.stderr)
         sys.exit(1)
+
+    if not args.all and not (args.spec and args.profile):
+        print("ERROR: provide --spec and --profile, or use --all", file=sys.stderr)
+        sys.exit(1)
+
+    if args.all:
+        generated = _generate_all(args.output_dir, args.sub_experiments)
+        if not generated:
+            print("ERROR: no experiments were generated", file=sys.stderr)
+            sys.exit(1)
+    else:
+        try:
+            exp_dir = _materialise(
+                spec_dir=args.spec,
+                profile_file=args.profile,
+                output_dir=args.output_dir,
+                sub_experiment_filter=args.sub_experiments,
+            )
+            print(exp_dir)
+            generated = [exp_dir]
+        except (FileNotFoundError, ValueError) as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            sys.exit(1)
+
+    if args.validate:
+        from framework.validate import validate
+
+        all_ok = True
+        for exp_dir in sorted(generated):
+            print("=" * 60)
+            if not validate(exp_dir, show_runs=args.show_runs):
+                all_ok = False
+            print()
+        sys.exit(0 if all_ok else 1)
 
 
 if __name__ == "__main__":

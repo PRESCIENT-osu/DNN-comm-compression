@@ -1,4 +1,5 @@
 .PHONY: lint format lint-fix install install-dev validate \
+        generate generate-all generate-all-validate \
         build build-resnet build-llama build-metrics build-orchestrator
 
 VENV := .venv
@@ -37,6 +38,20 @@ validate:
 		exit 1; \
 	fi
 	$(PYTHON) -m framework.validate $(EXPERIMENT) $(if $(SHOW_RUNS),--show-runs)
+
+generate:
+	@if [ -z "$(SPEC)" ] || [ -z "$(PROFILE)" ]; then \
+		echo "Usage: make generate SPEC=specs/<path> PROFILE=profiles/<path>.yaml [SUB_EXPERIMENTS='a b']"; \
+		exit 1; \
+	fi
+	$(PYTHON) tools/generate.py --spec $(SPEC) --profile $(PROFILE) \
+		$(if $(SUB_EXPERIMENTS),--sub-experiments $(SUB_EXPERIMENTS))
+
+generate-all:
+	$(PYTHON) tools/generate.py --all
+
+generate-all-validate:
+	$(PYTHON) tools/generate.py --all --validate --show-runs
 
 # ---------------------------------------------------------------------------
 # Docker image builds  (build context is always the repo root)
