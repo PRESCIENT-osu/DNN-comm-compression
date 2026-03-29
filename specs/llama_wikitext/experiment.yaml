@@ -1,7 +1,7 @@
 model: llama-3.1-8b
 dataset:
   name: wikitext2
-  path: models/llama/.partitions/tokenizer
+  path: .datasets/wikitext
   tokenizer_path: models/llama/.partitions/tokenizer
   batch_size: 2
   max_in_flight: 2
