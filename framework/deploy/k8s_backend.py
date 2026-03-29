@@ -141,6 +141,7 @@ def _metrics_pod(
                 {
                     "name": "metrics-server",
                     "image": image,
+                    "imagePullPolicy": "Never",
                     "command": [
                         "python",
                         "-m",
@@ -258,6 +259,7 @@ def _node_pod(
         "name": pod_name,
         "image": image,
         "args": ["python", "-m", node_module],
+        "imagePullPolicy": "Never",
         "ports": [{"containerPort": node_cfg.port}],
         "env": env,
         "resources": resources,
@@ -364,6 +366,7 @@ def _orchestrator_job(
                         {
                             "name": "orchestrator",
                             "image": image,
+                            "imagePullPolicy": "Never",
                             "args": [
                                 "python",
                                 "-m",
