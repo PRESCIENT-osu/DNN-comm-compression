@@ -12,10 +12,10 @@ sub_experiments:
   topk:
     baselines:
       - sub_experiment: baseline
-      - spec: llama/single-node
+      - spec: llama_wikitext/single-node
         sub_experiment: baseline
         profile: single-node/default
-    sweep_mode: pair
+    sweep_mode: paired
     sweep:
       - links:
           - from: A

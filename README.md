@@ -25,6 +25,7 @@ framework/
 ├── datamodels/                     # all Pydantic schemas and data containers
 │   ├── experiment.py               # ExperimentConfig, NodeConfig, SweepEntry, …
 │   ├── infra.py                    # InfraConfig, InfraNodeConfig, …
+│   ├── spec.py                     # GeneratedExperimentConfig, ResolvedSubExperiment
 │   ├── events.py                   # BaseEvent and all metric event types
 │   ├── api.py                      # InferRequest, ConfigUpdate, ResultPayload
 │   └── results.py                  # RunRecord, LlamaRunRecord
@@ -54,6 +55,28 @@ framework/
     ├── analyze.py
     └── visualize.py
 
+tools/
+└── generate.py                     # experiment generation tool
+
+specs/                              # experiment definitions (what)
+├── resnet56/
+│   ├── experiment.yaml             # model-level defaults
+│   ├── sub_experiments.yaml        # compression sub-experiments
+│   ├── equal-split/
+│   ├── single-node/
+│   └── ...
+└── llama/
+    └── ...
+
+profiles/                           # infrastructure definitions (where)
+├── single-node/
+│   └── default.yaml
+└── linear-3/
+    ├── default.yaml                # 1 Gbps, no constraints
+    ├── 100mbps.yaml
+    └── wan.yaml                    # WAN with delay/jitter/loss
+
+experiments/                        # generated output — gitignored
 docker/
 ├── Dockerfile.compute-resnet       # CUDA + PyTorch, torchvision
 ├── Dockerfile.compute-llama        # CUDA + PyTorch, transformers
@@ -83,6 +106,31 @@ make format      # format code
 make lint-fix    # fix linting issues and format
 ```
 
+## Generating an Experiment Config
+
+Experiments are defined by composing a **spec** (what runs — model, partitioning, compression variants) with a **profile** (where it runs — topology, network conditions, resource limits). The `tools/generate.py` tool resolves the combination and writes a ready-to-deploy experiment directory under `experiments/`.
+
+```bash
+python tools/generate.py \
+    --spec specs/resnet56/equal-split \
+    --profile profiles/linear-3/100mbps.yaml
+```
+
+This produces `experiments/resnet56_equal-split_linear-3_100mbps/` containing:
+- `experiment.yaml` — merged spec with all sub-experiments resolved
+- `infra.yaml` — the profile verbatim
+
+To include only specific sub-experiments:
+
+```bash
+python tools/generate.py \
+    --spec specs/resnet56/equal-split \
+    --profile profiles/linear-3/100mbps.yaml \
+    --sub-experiments baseline topk_paired
+```
+
+Referenced baseline experiments are materialised automatically. See [docs/config.md](docs/config.md) for full documentation on specs, profiles, sub-experiments, and baseline references.
+
 ## Building Docker Images
 
 ```bash
@@ -100,12 +148,12 @@ See [docs/deployment.md](docs/deployment.md) for details on each image.
 ## Validating a Config
 
 ```bash
-python -m framework.validate experiments/resnet56_topk_sweep
-python -m framework.validate experiments/resnet56_topk_sweep --show-runs
+python -m framework.validate experiments/resnet56_equal-split_linear-3_100mbps
+python -m framework.validate experiments/resnet56_equal-split_linear-3_100mbps --show-runs
 
 # via Makefile
-make validate EXPERIMENT=experiments/resnet56_topk_sweep
-make validate EXPERIMENT=experiments/resnet56_topk_sweep SHOW_RUNS=1
+make validate EXPERIMENT=experiments/resnet56_equal-split_linear-3_100mbps
+make validate EXPERIMENT=experiments/resnet56_equal-split_linear-3_100mbps SHOW_RUNS=1
 ```
 
 Validation checks both configs, resolves infra inheritance, expands the sweep, validates node topology, and runs fairness checks against referenced baselines.
@@ -114,7 +162,7 @@ Validation checks both configs, resolves infra inheritance, expands the sweep, v
 
 ```bash
 python -m framework.deploy \
-  --experiment experiments/resnet56_topk_sweep \
+  --experiment experiments/resnet56_equal-split_linear-3_100mbps \
   --target docker \
   --partitions-dir models/resnet/.partitions \
   --dataset-dir .datasets/cifar10 \
@@ -128,8 +176,8 @@ See the model-specific guides for full step-by-step instructions:
 ## Analyzing Results
 
 ```bash
-python -m framework.analysis.analyze --experiment resnet56_topk_sweep
-python -m framework.analysis.visualize --experiment resnet56_topk_sweep
+python -m framework.analysis.analyze --experiment resnet56_equal-split_linear-3_100mbps
+python -m framework.analysis.visualize --experiment resnet56_equal-split_linear-3_100mbps
 ```
 
 ## Model Partitioning
