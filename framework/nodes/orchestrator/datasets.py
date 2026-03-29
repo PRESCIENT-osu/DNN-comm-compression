@@ -42,21 +42,41 @@ class Cifar10Dataset(Dataset):
     Args:
         path: Directory containing (or where to download) the CIFAR-10 data.
         batch_size: Number of images per batch.
+        max_samples: If set, cap the number of images used. Applied after
+            optional shuffling so the subset is consistent across runs.
+        seed: If set, shuffle the test set with this seed before subsetting.
+            Must be set together with max_samples to have any effect; a seed
+            alone (without max_samples) still shuffles, giving a randomised
+            order that is stable across sweep runs.
     """
 
     _MEAN = (0.4914, 0.4822, 0.4465)
     _STD = (0.2023, 0.1994, 0.2010)
 
-    def __init__(self, path: str, batch_size: int) -> None:
+    def __init__(
+        self,
+        path: str,
+        batch_size: int,
+        max_samples: int | None = None,
+        seed: int | None = None,
+    ) -> None:
         transform = transforms.Compose(
             [
                 transforms.ToTensor(),
                 transforms.Normalize(self._MEAN, self._STD),
             ]
         )
-        self._dataset = torchvision.datasets.CIFAR10(
+        base = torchvision.datasets.CIFAR10(
             root=path, train=False, download=True, transform=transform
         )
+        if seed is not None:
+            generator = torch.Generator().manual_seed(seed)
+            indices = torch.randperm(len(base), generator=generator).tolist()
+        else:
+            indices = list(range(len(base)))
+        if max_samples is not None:
+            indices = indices[:max_samples]
+        self._dataset = torch.utils.data.Subset(base, indices)
         self._batch_size = batch_size
         self._loader = torch.utils.data.DataLoader(
             self._dataset,
@@ -105,4 +125,9 @@ def get_dataset(config: DatasetConfig) -> Dataset:
         raise ValueError(
             f"Unsupported dataset '{config.name}'. Supported: {list(_REGISTRY.keys())}"
         )
-    return cls(path=config.path, batch_size=config.batch_size)
+    return cls(
+        path=config.path,
+        batch_size=config.batch_size,
+        max_samples=config.max_samples,
+        seed=config.seed,
+    )

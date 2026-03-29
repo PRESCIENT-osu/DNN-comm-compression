@@ -4,6 +4,8 @@ dataset:
   path: .datasets/cifar10
   batch_size: 100
   max_in_flight: 10
+  max_samples: 1000
+  seed: 42
 metrics_server:
   host: metrics
   port: 9100

@@ -162,6 +162,8 @@ class DatasetConfig(BaseModel):
     subjects: list[str] | None = None
     samples_per_subject: int | None = None
     tokenizer_path: str | None = None
+    max_samples: int | None = None
+    seed: int | None = None
 
 
 class MetricsServerConfig(BaseModel):

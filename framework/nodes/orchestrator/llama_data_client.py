@@ -61,9 +61,16 @@ class _WikiText2Batches:
         seq_len = config.max_seq_len
         # Truncate to multiple of seq_len
         n_complete = len(tokens) // seq_len
-        tokens = tokens[: n_complete * seq_len]
-        # Shape: [n_complete, seq_len]
-        self._chunks = tokens.view(n_complete, seq_len)
+        chunks = tokens[: n_complete * seq_len].view(n_complete, seq_len)
+
+        if config.seed is not None:
+            generator = torch.Generator().manual_seed(config.seed)
+            idx = torch.randperm(len(chunks), generator=generator)
+        else:
+            idx = torch.arange(len(chunks))
+        if config.max_samples is not None:
+            idx = idx[: config.max_samples]
+        self._chunks = chunks[idx]
         self._batch_size = config.batch_size
 
     def batches(self) -> Iterator[tuple[int, torch.Tensor, list[int]]]:
@@ -99,11 +106,21 @@ class _MMLUBatches:
         ]
         samples_per = config.samples_per_subject or 50
 
+        rng = (
+            torch.Generator().manual_seed(config.seed)
+            if config.seed is not None
+            else None
+        )
+
         items: list[dict[str, Any]] = []
         for subj in subjects:
             try:
                 ds = load_dataset("cais/mmlu", subj, split="test")
-                indices = list(range(min(len(ds), samples_per)))
+                n = min(len(ds), samples_per)
+                if rng is not None:
+                    indices = torch.randperm(len(ds), generator=rng).tolist()[:n]
+                else:
+                    indices = list(range(n))
                 for i in indices:
                     item = ds[i]
                     items.append(
@@ -117,6 +134,13 @@ class _MMLUBatches:
                 logging.getLogger(__name__).warning(
                     "Skipping MMLU subject %s: %s", subj, exc
                 )
+
+        if config.max_samples is not None:
+            if rng is not None:
+                order = torch.randperm(len(items), generator=rng).tolist()
+                items = [items[i] for i in order[: config.max_samples]]
+            else:
+                items = items[: config.max_samples]
 
         self._items = items
         self._tokenizer = tokenizer

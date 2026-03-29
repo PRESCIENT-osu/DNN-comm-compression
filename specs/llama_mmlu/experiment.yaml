@@ -12,7 +12,8 @@ dataset:
     - global_facts
     - miscellaneous
     - business_ethics
-  samples_per_subject: 50
+  samples_per_subject: 20
+  seed: 42
 metrics_server:
   host: metrics
   port: 9100
