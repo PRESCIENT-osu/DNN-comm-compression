@@ -98,16 +98,17 @@ def load_spec(spec_dir: Path) -> dict[str, Any]:
 
 
 def load_sub_experiments(spec_dir: Path) -> dict[str, Any]:
-    """Walk the spec hierarchy and merge sub_experiments.yaml layers.
+    """Walk the spec hierarchy and resolve sub_experiments.yaml layers.
 
-    Child entries override parent entries with the same name; new child
-    entries are added without affecting parent entries.
+    If a level has its own sub_experiments.yaml it completely replaces
+    everything inherited from parent levels.  Levels without a
+    sub_experiments.yaml pass through the parent's entries unchanged.
 
     Args:
         spec_dir: Path to the spec directory (e.g. specs/resnet56/equal-split).
 
     Returns:
-        Merged dict of sub-experiment name → sub-experiment config dict.
+        Resolved dict of sub-experiment name → sub-experiment config dict.
     """
     parts = spec_dir.relative_to(SPECS_DIR).parts
     merged: dict[str, Any] = {}
@@ -117,8 +118,7 @@ def load_sub_experiments(spec_dir: Path) -> dict[str, Any]:
         yaml_path = current / "sub_experiments.yaml"
         if yaml_path.exists():
             data = _load_yaml(yaml_path)
-            child_entries = data.get("sub_experiments", {})
-            merged = {**merged, **child_entries}
+            merged = data.get("sub_experiments", {})
     return merged
 
 

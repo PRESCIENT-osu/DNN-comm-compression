@@ -267,7 +267,7 @@ class ExperimentConfig(BaseModel):
 
             topk-A-B_0.10--topk-B-C_0.30
             topk-A-B_0.10--quantization-B-C_0.25
-            llmint8-A-B_fp16-int8--none-B-C
+            llmint8-A-B_fp16-int8@0.01--none-B-C
             none-A-B--none-B-C
         """
         parts: list[str] = []
@@ -277,7 +277,7 @@ class ExperimentConfig(BaseModel):
             elif lk.compression == CompressionMethod.LLMINT8:
                 parts.append(
                     f"llmint8-{lk.from_node}-{lk.to_node}"
-                    f"_{lk.outlier_precision}-{lk.regular_precision}"
+                    f"_{lk.outlier_precision}-{lk.regular_precision}@{lk.rate:.2f}"
                 )
             else:
                 parts.append(
