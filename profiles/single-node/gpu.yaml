@@ -1,0 +1,5 @@
+nodes:
+  - name: A
+    resources:
+      gpu: 1
+links: []

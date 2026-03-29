@@ -1,4 +1,10 @@
 nodes:
   - name: A
+    resources:
+      gpu: 1
   - name: B
+    resources:
+      gpu: 1
   - name: C
+    resources:
+      gpu: 1

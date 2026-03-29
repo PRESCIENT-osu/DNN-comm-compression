@@ -4,7 +4,7 @@ sub_experiments:
     baselines:
       - spec: llama_wikitext/single-node
         sub_experiment: baseline
-        profile: single-node/default
+        profile: single-node/gpu
     links:
       - from: A
         to: B
@@ -17,7 +17,7 @@ sub_experiments:
     baselines:
       - spec: llama_wikitext/single-node
         sub_experiment: baseline
-        profile: single-node/default
+        profile: single-node/gpu
       - sub_experiment: baseline
       - sub_experiment: topk_quantization
       - sub_experiment: topk_llmint8
@@ -50,7 +50,7 @@ sub_experiments:
     baselines:
       - spec: llama_wikitext/single-node
         sub_experiment: baseline
-        profile: single-node/default
+        profile: single-node/gpu
       - sub_experiment: baseline
       - sub_experiment: topk_topk
       - sub_experiment: topk_llmint8
@@ -83,7 +83,7 @@ sub_experiments:
     baselines:
       - spec: llama_wikitext/single-node
         sub_experiment: baseline
-        profile: single-node/default
+        profile: single-node/gpu
       - sub_experiment: baseline
       - sub_experiment: topk_topk
       - sub_experiment: topk_quantization
@@ -118,7 +118,7 @@ sub_experiments:
     baselines:
       - spec: llama_wikitext/single-node
         sub_experiment: baseline
-        profile: single-node/default
+        profile: single-node/gpu
       - sub_experiment: baseline
       - sub_experiment: topk_topk
       - sub_experiment: topk_quantization
@@ -151,7 +151,7 @@ sub_experiments:
     baselines:
       - spec: llama_wikitext/single-node
         sub_experiment: baseline
-        profile: single-node/default
+        profile: single-node/gpu
       - sub_experiment: baseline
       - sub_experiment: topk_topk
       - sub_experiment: topk_quantization
@@ -184,7 +184,7 @@ sub_experiments:
     baselines:
       - spec: llama_wikitext/single-node
         sub_experiment: baseline
-        profile: single-node/default
+        profile: single-node/gpu
       - sub_experiment: baseline
       - sub_experiment: topk_topk
       - sub_experiment: topk_quantization
@@ -219,7 +219,7 @@ sub_experiments:
     baselines:
       - spec: llama_wikitext/single-node
         sub_experiment: baseline
-        profile: single-node/default
+        profile: single-node/gpu
       - sub_experiment: baseline
       - sub_experiment: topk_topk
       - sub_experiment: topk_quantization
@@ -254,7 +254,7 @@ sub_experiments:
     baselines:
       - spec: llama_wikitext/single-node
         sub_experiment: baseline
-        profile: single-node/default
+        profile: single-node/gpu
       - sub_experiment: baseline
       - sub_experiment: topk_topk
       - sub_experiment: topk_quantization
@@ -289,7 +289,7 @@ sub_experiments:
     baselines:
       - spec: llama_wikitext/single-node
         sub_experiment: baseline
-        profile: single-node/default
+        profile: single-node/gpu
       - sub_experiment: baseline
       - sub_experiment: topk_topk
       - sub_experiment: topk_quantization
@@ -326,7 +326,7 @@ sub_experiments:
     baselines:
       - spec: llama_wikitext/single-node
         sub_experiment: baseline
-        profile: single-node/default
+        profile: single-node/gpu
       - sub_experiment: baseline
       - sub_experiment: topk_topk
       - sub_experiment: topk_quantization
@@ -363,7 +363,7 @@ sub_experiments:
     baselines:
       - spec: llama_wikitext/single-node
         sub_experiment: baseline
-        profile: single-node/default
+        profile: single-node/gpu
       - sub_experiment: baseline
       - sub_experiment: topk_topk
       - sub_experiment: topk_quantization
@@ -400,7 +400,7 @@ sub_experiments:
     baselines:
       - spec: llama_wikitext/single-node
         sub_experiment: baseline
-        profile: single-node/default
+        profile: single-node/gpu
       - sub_experiment: baseline
       - sub_experiment: topk_topk
       - sub_experiment: topk_quantization
@@ -437,7 +437,7 @@ sub_experiments:
     baselines:
       - spec: llama_wikitext/single-node
         sub_experiment: baseline
-        profile: single-node/default
+        profile: single-node/gpu
       - sub_experiment: baseline
       - sub_experiment: topk_topk
       - sub_experiment: topk_quantization
@@ -474,7 +474,7 @@ sub_experiments:
     baselines:
       - spec: llama_wikitext/single-node
         sub_experiment: baseline
-        profile: single-node/default
+        profile: single-node/gpu
       - sub_experiment: baseline
       - sub_experiment: topk_topk
       - sub_experiment: topk_quantization
@@ -511,7 +511,7 @@ sub_experiments:
     baselines:
       - spec: llama_wikitext/single-node
         sub_experiment: baseline
-        profile: single-node/default
+        profile: single-node/gpu
       - sub_experiment: baseline
       - sub_experiment: topk_topk
       - sub_experiment: topk_quantization
@@ -548,7 +548,7 @@ sub_experiments:
     baselines:
       - spec: llama_wikitext/single-node
         sub_experiment: baseline
-        profile: single-node/default
+        profile: single-node/gpu
       - sub_experiment: baseline
       - sub_experiment: topk_topk
       - sub_experiment: topk_quantization
