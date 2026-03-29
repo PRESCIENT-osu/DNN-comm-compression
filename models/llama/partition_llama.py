@@ -5,7 +5,9 @@ Partition layout:
   p2 — layers[11..21]                   in: float [B, L, 4096]  out: float [B, L, 4096]
   p3 — layers[22..31] + norm + lm_head  in: float [B, L, 4096]  out: float [B, L, 128256]
 
-Each partition reconstructs position_ids from input shape. Passes attention_mask=None so
+Each partition reconstructs position_ids from input shape and computes RoPE embeddings via
+the shared rotary_emb module (required by transformers >=4.44 where LlamaDecoderLayer no
+longer computes position_embeddings internally). Passes attention_mask=None so
 LlamaSdpaAttention uses is_causal=True for prefill (q_len > 1). Prefill-only: no KV cache.
 
 Saved with torch.save(module, path) — NOT TorchScript. At load time the LlamaPartition*
@@ -50,12 +52,16 @@ class LlamaPartition1(nn.Module):
     Args:
         embed_tokens: Token embedding module from the base model.
         layers: ModuleList of the first 11 decoder layers.
+        rotary_emb: Shared rotary embedding module from the base model.
     """
 
-    def __init__(self, embed_tokens: nn.Module, layers: nn.ModuleList) -> None:
+    def __init__(
+        self, embed_tokens: nn.Module, layers: nn.ModuleList, rotary_emb: nn.Module
+    ) -> None:
         super().__init__()
         self.embed_tokens = embed_tokens
         self.layers = layers
+        self.rotary_emb = rotary_emb
 
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
         """Embed tokens and run the first 11 decoder layers.
@@ -71,11 +77,13 @@ class LlamaPartition1(nn.Module):
         position_ids = (
             torch.arange(L, device=input_ids.device).unsqueeze(0).expand(B, -1)
         )
+        position_embeddings = self.rotary_emb(hidden_states, position_ids)
         for layer in self.layers:
             out = layer(
                 hidden_states,
                 attention_mask=None,
                 position_ids=position_ids,
+                position_embeddings=position_embeddings,
                 use_cache=False,
             )
             hidden_states = out[0]
@@ -87,11 +95,13 @@ class LlamaPartition2(nn.Module):
 
     Args:
         layers: ModuleList of decoder layers 11 through 21 inclusive.
+        rotary_emb: Shared rotary embedding module from the base model.
     """
 
-    def __init__(self, layers: nn.ModuleList) -> None:
+    def __init__(self, layers: nn.ModuleList, rotary_emb: nn.Module) -> None:
         super().__init__()
         self.layers = layers
+        self.rotary_emb = rotary_emb
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """Run 11 middle decoder layers.
@@ -106,11 +116,13 @@ class LlamaPartition2(nn.Module):
         position_ids = (
             torch.arange(L, device=hidden_states.device).unsqueeze(0).expand(B, -1)
         )
+        position_embeddings = self.rotary_emb(hidden_states, position_ids)
         for layer in self.layers:
             out = layer(
                 hidden_states,
                 attention_mask=None,
                 position_ids=position_ids,
+                position_embeddings=position_embeddings,
                 use_cache=False,
             )
             hidden_states = out[0]
@@ -124,15 +136,21 @@ class LlamaPartition3(nn.Module):
         layers: ModuleList of the last 10 decoder layers.
         norm: Final RMSNorm module.
         lm_head: Linear projection to vocabulary size.
+        rotary_emb: Shared rotary embedding module from the base model.
     """
 
     def __init__(
-        self, layers: nn.ModuleList, norm: nn.Module, lm_head: nn.Module
+        self,
+        layers: nn.ModuleList,
+        norm: nn.Module,
+        lm_head: nn.Module,
+        rotary_emb: nn.Module,
     ) -> None:
         super().__init__()
         self.layers = layers
         self.norm = norm
         self.lm_head = lm_head
+        self.rotary_emb = rotary_emb
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """Run the final 10 decoder layers, norm, and project to vocab logits.
@@ -147,11 +165,13 @@ class LlamaPartition3(nn.Module):
         position_ids = (
             torch.arange(L, device=hidden_states.device).unsqueeze(0).expand(B, -1)
         )
+        position_embeddings = self.rotary_emb(hidden_states, position_ids)
         for layer in self.layers:
             out = layer(
                 hidden_states,
                 attention_mask=None,
                 position_ids=position_ids,
+                position_embeddings=position_embeddings,
                 use_cache=False,
             )
             hidden_states = out[0]
@@ -234,14 +254,17 @@ def partition_and_save(
     p1 = LlamaPartition1(
         embed_tokens=model.model.embed_tokens,
         layers=nn.ModuleList(list(layers[: cut1 + 1])),
+        rotary_emb=model.model.rotary_emb,
     )
     p2 = LlamaPartition2(
         layers=nn.ModuleList(list(layers[cut1 + 1 : cut2 + 1])),
+        rotary_emb=model.model.rotary_emb,
     )
     p3 = LlamaPartition3(
         layers=nn.ModuleList(list(layers[cut2 + 1 :])),
         norm=model.model.norm,
         lm_head=model.lm_head,
+        rotary_emb=model.model.rotary_emb,
     )
 
     saved: dict[str, Path] = {}
