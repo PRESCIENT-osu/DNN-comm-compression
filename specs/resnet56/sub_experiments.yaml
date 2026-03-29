@@ -1,6 +1,10 @@
 sub_experiments:
 
   baseline:
+    baselines:
+      - spec: resnet56/single-node
+        sub_experiment: baseline
+        profile: single-node/default
     links:
       - from: A
         to: B
@@ -9,38 +13,570 @@ sub_experiments:
         to: C
         compression: none
 
-  topk_paired:
+  topk_topk:
     baselines:
-      - sub_experiment: baseline
       - spec: resnet56/single-node
         sub_experiment: baseline
         profile: single-node/default
-    sweep_mode: paired
-    sweep:
-      - links:
-          - from: A
-            to: B
-            compression: topk
-            rates: [0.1, 0.3, 0.5]
-          - from: B
-            to: C
-            compression: topk
-            rates: [0.1, 0.3, 0.5]
-
-  topk_product:
-    baselines:
       - sub_experiment: baseline
-      - spec: resnet56/single-node
-        sub_experiment: baseline
-        profile: single-node/default
+      - sub_experiment: topk_quantization
+      - sub_experiment: topk_llmint8
+      - sub_experiment: quantization_topk
+      - sub_experiment: quantization_quantization
+      - sub_experiment: quantization_llmint8
+      - sub_experiment: llmint8_topk
+      - sub_experiment: llmint8_quantization
+      - sub_experiment: llmint8_llmint8_fp16_fp16
+      - sub_experiment: llmint8_llmint8_fp16_int8
+      - sub_experiment: llmint8_llmint8_fp16_int4
+      - sub_experiment: llmint8_llmint8_fp16_int2
+      - sub_experiment: llmint8_llmint8_int8_fp16
+      - sub_experiment: llmint8_llmint8_int8_int8
+      - sub_experiment: llmint8_llmint8_int8_int4
+      - sub_experiment: llmint8_llmint8_int8_int2
     sweep_mode: product
     sweep:
       - links:
           - from: A
             to: B
             compression: topk
-            rates: [0.1, 0.25, 0.5, 0.75, 1.0]
+            rates: [0.0625, 0.125, 0.25, 0.5, 0.75, 1.0]
           - from: B
             to: C
             compression: topk
-            rates: [0.1, 0.25, 0.5, 0.75, 1.0]
+            rates: [0.0625, 0.125, 0.25, 0.5, 0.75, 1.0]
+
+  topk_quantization:
+    baselines:
+      - spec: resnet56/single-node
+        sub_experiment: baseline
+        profile: single-node/default
+      - sub_experiment: baseline
+      - sub_experiment: topk_topk
+      - sub_experiment: topk_llmint8
+      - sub_experiment: quantization_topk
+      - sub_experiment: quantization_quantization
+      - sub_experiment: quantization_llmint8
+      - sub_experiment: llmint8_topk
+      - sub_experiment: llmint8_quantization
+      - sub_experiment: llmint8_llmint8_fp16_fp16
+      - sub_experiment: llmint8_llmint8_fp16_int8
+      - sub_experiment: llmint8_llmint8_fp16_int4
+      - sub_experiment: llmint8_llmint8_fp16_int2
+      - sub_experiment: llmint8_llmint8_int8_fp16
+      - sub_experiment: llmint8_llmint8_int8_int8
+      - sub_experiment: llmint8_llmint8_int8_int4
+      - sub_experiment: llmint8_llmint8_int8_int2
+    sweep_mode: product
+    sweep:
+      - links:
+          - from: A
+            to: B
+            compression: topk
+            rates: [0.0625, 0.125, 0.25, 0.5, 0.75, 1.0]
+          - from: B
+            to: C
+            compression: quantization
+            rates: [0.5, 0.25, 0.125, 0.0625]
+
+  topk_llmint8:
+    baselines:
+      - spec: resnet56/single-node
+        sub_experiment: baseline
+        profile: single-node/default
+      - sub_experiment: baseline
+      - sub_experiment: topk_topk
+      - sub_experiment: topk_quantization
+      - sub_experiment: quantization_topk
+      - sub_experiment: quantization_quantization
+      - sub_experiment: quantization_llmint8
+      - sub_experiment: llmint8_topk
+      - sub_experiment: llmint8_quantization
+      - sub_experiment: llmint8_llmint8_fp16_fp16
+      - sub_experiment: llmint8_llmint8_fp16_int8
+      - sub_experiment: llmint8_llmint8_fp16_int4
+      - sub_experiment: llmint8_llmint8_fp16_int2
+      - sub_experiment: llmint8_llmint8_int8_fp16
+      - sub_experiment: llmint8_llmint8_int8_int8
+      - sub_experiment: llmint8_llmint8_int8_int4
+      - sub_experiment: llmint8_llmint8_int8_int2
+    sweep_mode: product
+    sweep:
+      - links:
+          - from: A
+            to: B
+            compression: topk
+            rates: [0.0625, 0.125, 0.25, 0.5, 0.75, 1.0]
+          - from: B
+            to: C
+            compression: llmint8
+            rates: [0.01, 0.05, 0.1, 0.25]
+            outlier_precision: fp16
+            regular_precision: int8
+
+  quantization_topk:
+    baselines:
+      - spec: resnet56/single-node
+        sub_experiment: baseline
+        profile: single-node/default
+      - sub_experiment: baseline
+      - sub_experiment: topk_topk
+      - sub_experiment: topk_quantization
+      - sub_experiment: topk_llmint8
+      - sub_experiment: quantization_quantization
+      - sub_experiment: quantization_llmint8
+      - sub_experiment: llmint8_topk
+      - sub_experiment: llmint8_quantization
+      - sub_experiment: llmint8_llmint8_fp16_fp16
+      - sub_experiment: llmint8_llmint8_fp16_int8
+      - sub_experiment: llmint8_llmint8_fp16_int4
+      - sub_experiment: llmint8_llmint8_fp16_int2
+      - sub_experiment: llmint8_llmint8_int8_fp16
+      - sub_experiment: llmint8_llmint8_int8_int8
+      - sub_experiment: llmint8_llmint8_int8_int4
+      - sub_experiment: llmint8_llmint8_int8_int2
+    sweep_mode: product
+    sweep:
+      - links:
+          - from: A
+            to: B
+            compression: quantization
+            rates: [0.5, 0.25, 0.125, 0.0625]
+          - from: B
+            to: C
+            compression: topk
+            rates: [0.0625, 0.125, 0.25, 0.5, 0.75, 1.0]
+
+  quantization_quantization:
+    baselines:
+      - spec: resnet56/single-node
+        sub_experiment: baseline
+        profile: single-node/default
+      - sub_experiment: baseline
+      - sub_experiment: topk_topk
+      - sub_experiment: topk_quantization
+      - sub_experiment: topk_llmint8
+      - sub_experiment: quantization_topk
+      - sub_experiment: quantization_llmint8
+      - sub_experiment: llmint8_topk
+      - sub_experiment: llmint8_quantization
+      - sub_experiment: llmint8_llmint8_fp16_fp16
+      - sub_experiment: llmint8_llmint8_fp16_int8
+      - sub_experiment: llmint8_llmint8_fp16_int4
+      - sub_experiment: llmint8_llmint8_fp16_int2
+      - sub_experiment: llmint8_llmint8_int8_fp16
+      - sub_experiment: llmint8_llmint8_int8_int8
+      - sub_experiment: llmint8_llmint8_int8_int4
+      - sub_experiment: llmint8_llmint8_int8_int2
+    sweep_mode: product
+    sweep:
+      - links:
+          - from: A
+            to: B
+            compression: quantization
+            rates: [0.5, 0.25, 0.125, 0.0625]
+          - from: B
+            to: C
+            compression: quantization
+            rates: [0.5, 0.25, 0.125, 0.0625]
+
+  quantization_llmint8:
+    baselines:
+      - spec: resnet56/single-node
+        sub_experiment: baseline
+        profile: single-node/default
+      - sub_experiment: baseline
+      - sub_experiment: topk_topk
+      - sub_experiment: topk_quantization
+      - sub_experiment: topk_llmint8
+      - sub_experiment: quantization_topk
+      - sub_experiment: quantization_quantization
+      - sub_experiment: llmint8_topk
+      - sub_experiment: llmint8_quantization
+      - sub_experiment: llmint8_llmint8_fp16_fp16
+      - sub_experiment: llmint8_llmint8_fp16_int8
+      - sub_experiment: llmint8_llmint8_fp16_int4
+      - sub_experiment: llmint8_llmint8_fp16_int2
+      - sub_experiment: llmint8_llmint8_int8_fp16
+      - sub_experiment: llmint8_llmint8_int8_int8
+      - sub_experiment: llmint8_llmint8_int8_int4
+      - sub_experiment: llmint8_llmint8_int8_int2
+    sweep_mode: product
+    sweep:
+      - links:
+          - from: A
+            to: B
+            compression: quantization
+            rates: [0.5, 0.25, 0.125, 0.0625]
+          - from: B
+            to: C
+            compression: llmint8
+            rates: [0.01, 0.05, 0.1, 0.25]
+            outlier_precision: fp16
+            regular_precision: int8
+
+  llmint8_topk:
+    baselines:
+      - spec: resnet56/single-node
+        sub_experiment: baseline
+        profile: single-node/default
+      - sub_experiment: baseline
+      - sub_experiment: topk_topk
+      - sub_experiment: topk_quantization
+      - sub_experiment: topk_llmint8
+      - sub_experiment: quantization_topk
+      - sub_experiment: quantization_quantization
+      - sub_experiment: quantization_llmint8
+      - sub_experiment: llmint8_quantization
+      - sub_experiment: llmint8_llmint8_fp16_fp16
+      - sub_experiment: llmint8_llmint8_fp16_int8
+      - sub_experiment: llmint8_llmint8_fp16_int4
+      - sub_experiment: llmint8_llmint8_fp16_int2
+      - sub_experiment: llmint8_llmint8_int8_fp16
+      - sub_experiment: llmint8_llmint8_int8_int8
+      - sub_experiment: llmint8_llmint8_int8_int4
+      - sub_experiment: llmint8_llmint8_int8_int2
+    sweep_mode: product
+    sweep:
+      - links:
+          - from: A
+            to: B
+            compression: llmint8
+            rates: [0.01, 0.05, 0.1, 0.25]
+            outlier_precision: fp16
+            regular_precision: int8
+          - from: B
+            to: C
+            compression: topk
+            rates: [0.0625, 0.125, 0.25, 0.5, 0.75, 1.0]
+
+  llmint8_quantization:
+    baselines:
+      - spec: resnet56/single-node
+        sub_experiment: baseline
+        profile: single-node/default
+      - sub_experiment: baseline
+      - sub_experiment: topk_topk
+      - sub_experiment: topk_quantization
+      - sub_experiment: topk_llmint8
+      - sub_experiment: quantization_topk
+      - sub_experiment: quantization_quantization
+      - sub_experiment: quantization_llmint8
+      - sub_experiment: llmint8_topk
+      - sub_experiment: llmint8_llmint8_fp16_fp16
+      - sub_experiment: llmint8_llmint8_fp16_int8
+      - sub_experiment: llmint8_llmint8_fp16_int4
+      - sub_experiment: llmint8_llmint8_fp16_int2
+      - sub_experiment: llmint8_llmint8_int8_fp16
+      - sub_experiment: llmint8_llmint8_int8_int8
+      - sub_experiment: llmint8_llmint8_int8_int4
+      - sub_experiment: llmint8_llmint8_int8_int2
+    sweep_mode: product
+    sweep:
+      - links:
+          - from: A
+            to: B
+            compression: llmint8
+            rates: [0.01, 0.05, 0.1, 0.25]
+            outlier_precision: fp16
+            regular_precision: int8
+          - from: B
+            to: C
+            compression: quantization
+            rates: [0.5, 0.25, 0.125, 0.0625]
+
+  llmint8_llmint8_fp16_fp16:
+    baselines:
+      - spec: resnet56/single-node
+        sub_experiment: baseline
+        profile: single-node/default
+      - sub_experiment: baseline
+      - sub_experiment: topk_topk
+      - sub_experiment: topk_quantization
+      - sub_experiment: topk_llmint8
+      - sub_experiment: quantization_topk
+      - sub_experiment: quantization_quantization
+      - sub_experiment: quantization_llmint8
+      - sub_experiment: llmint8_topk
+      - sub_experiment: llmint8_quantization
+      - sub_experiment: llmint8_llmint8_fp16_int8
+      - sub_experiment: llmint8_llmint8_fp16_int4
+      - sub_experiment: llmint8_llmint8_fp16_int2
+      - sub_experiment: llmint8_llmint8_int8_fp16
+      - sub_experiment: llmint8_llmint8_int8_int8
+      - sub_experiment: llmint8_llmint8_int8_int4
+      - sub_experiment: llmint8_llmint8_int8_int2
+    sweep_mode: product
+    sweep:
+      - links:
+          - from: A
+            to: B
+            compression: llmint8
+            rates: [0.01, 0.05, 0.1, 0.25]
+            outlier_precision: fp16
+            regular_precision: fp16
+          - from: B
+            to: C
+            compression: llmint8
+            rates: [0.01, 0.05, 0.1, 0.25]
+            outlier_precision: fp16
+            regular_precision: fp16
+
+  llmint8_llmint8_fp16_int8:
+    baselines:
+      - spec: resnet56/single-node
+        sub_experiment: baseline
+        profile: single-node/default
+      - sub_experiment: baseline
+      - sub_experiment: topk_topk
+      - sub_experiment: topk_quantization
+      - sub_experiment: topk_llmint8
+      - sub_experiment: quantization_topk
+      - sub_experiment: quantization_quantization
+      - sub_experiment: quantization_llmint8
+      - sub_experiment: llmint8_topk
+      - sub_experiment: llmint8_quantization
+      - sub_experiment: llmint8_llmint8_fp16_fp16
+      - sub_experiment: llmint8_llmint8_fp16_int4
+      - sub_experiment: llmint8_llmint8_fp16_int2
+      - sub_experiment: llmint8_llmint8_int8_fp16
+      - sub_experiment: llmint8_llmint8_int8_int8
+      - sub_experiment: llmint8_llmint8_int8_int4
+      - sub_experiment: llmint8_llmint8_int8_int2
+    sweep_mode: product
+    sweep:
+      - links:
+          - from: A
+            to: B
+            compression: llmint8
+            rates: [0.01, 0.05, 0.1, 0.25]
+            outlier_precision: fp16
+            regular_precision: int8
+          - from: B
+            to: C
+            compression: llmint8
+            rates: [0.01, 0.05, 0.1, 0.25]
+            outlier_precision: fp16
+            regular_precision: int8
+
+  llmint8_llmint8_fp16_int4:
+    baselines:
+      - spec: resnet56/single-node
+        sub_experiment: baseline
+        profile: single-node/default
+      - sub_experiment: baseline
+      - sub_experiment: topk_topk
+      - sub_experiment: topk_quantization
+      - sub_experiment: topk_llmint8
+      - sub_experiment: quantization_topk
+      - sub_experiment: quantization_quantization
+      - sub_experiment: quantization_llmint8
+      - sub_experiment: llmint8_topk
+      - sub_experiment: llmint8_quantization
+      - sub_experiment: llmint8_llmint8_fp16_fp16
+      - sub_experiment: llmint8_llmint8_fp16_int8
+      - sub_experiment: llmint8_llmint8_fp16_int2
+      - sub_experiment: llmint8_llmint8_int8_fp16
+      - sub_experiment: llmint8_llmint8_int8_int8
+      - sub_experiment: llmint8_llmint8_int8_int4
+      - sub_experiment: llmint8_llmint8_int8_int2
+    sweep_mode: product
+    sweep:
+      - links:
+          - from: A
+            to: B
+            compression: llmint8
+            rates: [0.01, 0.05, 0.1, 0.25]
+            outlier_precision: fp16
+            regular_precision: int4
+          - from: B
+            to: C
+            compression: llmint8
+            rates: [0.01, 0.05, 0.1, 0.25]
+            outlier_precision: fp16
+            regular_precision: int4
+
+  llmint8_llmint8_fp16_int2:
+    baselines:
+      - spec: resnet56/single-node
+        sub_experiment: baseline
+        profile: single-node/default
+      - sub_experiment: baseline
+      - sub_experiment: topk_topk
+      - sub_experiment: topk_quantization
+      - sub_experiment: topk_llmint8
+      - sub_experiment: quantization_topk
+      - sub_experiment: quantization_quantization
+      - sub_experiment: quantization_llmint8
+      - sub_experiment: llmint8_topk
+      - sub_experiment: llmint8_quantization
+      - sub_experiment: llmint8_llmint8_fp16_fp16
+      - sub_experiment: llmint8_llmint8_fp16_int8
+      - sub_experiment: llmint8_llmint8_fp16_int4
+      - sub_experiment: llmint8_llmint8_int8_fp16
+      - sub_experiment: llmint8_llmint8_int8_int8
+      - sub_experiment: llmint8_llmint8_int8_int4
+      - sub_experiment: llmint8_llmint8_int8_int2
+    sweep_mode: product
+    sweep:
+      - links:
+          - from: A
+            to: B
+            compression: llmint8
+            rates: [0.01, 0.05, 0.1, 0.25]
+            outlier_precision: fp16
+            regular_precision: int2
+          - from: B
+            to: C
+            compression: llmint8
+            rates: [0.01, 0.05, 0.1, 0.25]
+            outlier_precision: fp16
+            regular_precision: int2
+
+  llmint8_llmint8_int8_fp16:
+    baselines:
+      - spec: resnet56/single-node
+        sub_experiment: baseline
+        profile: single-node/default
+      - sub_experiment: baseline
+      - sub_experiment: topk_topk
+      - sub_experiment: topk_quantization
+      - sub_experiment: topk_llmint8
+      - sub_experiment: quantization_topk
+      - sub_experiment: quantization_quantization
+      - sub_experiment: quantization_llmint8
+      - sub_experiment: llmint8_topk
+      - sub_experiment: llmint8_quantization
+      - sub_experiment: llmint8_llmint8_fp16_fp16
+      - sub_experiment: llmint8_llmint8_fp16_int8
+      - sub_experiment: llmint8_llmint8_fp16_int4
+      - sub_experiment: llmint8_llmint8_fp16_int2
+      - sub_experiment: llmint8_llmint8_int8_int8
+      - sub_experiment: llmint8_llmint8_int8_int4
+      - sub_experiment: llmint8_llmint8_int8_int2
+    sweep_mode: product
+    sweep:
+      - links:
+          - from: A
+            to: B
+            compression: llmint8
+            rates: [0.01, 0.05, 0.1, 0.25]
+            outlier_precision: int8
+            regular_precision: fp16
+          - from: B
+            to: C
+            compression: llmint8
+            rates: [0.01, 0.05, 0.1, 0.25]
+            outlier_precision: int8
+            regular_precision: fp16
+
+  llmint8_llmint8_int8_int8:
+    baselines:
+      - spec: resnet56/single-node
+        sub_experiment: baseline
+        profile: single-node/default
+      - sub_experiment: baseline
+      - sub_experiment: topk_topk
+      - sub_experiment: topk_quantization
+      - sub_experiment: topk_llmint8
+      - sub_experiment: quantization_topk
+      - sub_experiment: quantization_quantization
+      - sub_experiment: quantization_llmint8
+      - sub_experiment: llmint8_topk
+      - sub_experiment: llmint8_quantization
+      - sub_experiment: llmint8_llmint8_fp16_fp16
+      - sub_experiment: llmint8_llmint8_fp16_int8
+      - sub_experiment: llmint8_llmint8_fp16_int4
+      - sub_experiment: llmint8_llmint8_fp16_int2
+      - sub_experiment: llmint8_llmint8_int8_fp16
+      - sub_experiment: llmint8_llmint8_int8_int4
+      - sub_experiment: llmint8_llmint8_int8_int2
+    sweep_mode: product
+    sweep:
+      - links:
+          - from: A
+            to: B
+            compression: llmint8
+            rates: [0.01, 0.05, 0.1, 0.25]
+            outlier_precision: int8
+            regular_precision: int8
+          - from: B
+            to: C
+            compression: llmint8
+            rates: [0.01, 0.05, 0.1, 0.25]
+            outlier_precision: int8
+            regular_precision: int8
+
+  llmint8_llmint8_int8_int4:
+    baselines:
+      - spec: resnet56/single-node
+        sub_experiment: baseline
+        profile: single-node/default
+      - sub_experiment: baseline
+      - sub_experiment: topk_topk
+      - sub_experiment: topk_quantization
+      - sub_experiment: topk_llmint8
+      - sub_experiment: quantization_topk
+      - sub_experiment: quantization_quantization
+      - sub_experiment: quantization_llmint8
+      - sub_experiment: llmint8_topk
+      - sub_experiment: llmint8_quantization
+      - sub_experiment: llmint8_llmint8_fp16_fp16
+      - sub_experiment: llmint8_llmint8_fp16_int8
+      - sub_experiment: llmint8_llmint8_fp16_int4
+      - sub_experiment: llmint8_llmint8_fp16_int2
+      - sub_experiment: llmint8_llmint8_int8_fp16
+      - sub_experiment: llmint8_llmint8_int8_int8
+      - sub_experiment: llmint8_llmint8_int8_int2
+    sweep_mode: product
+    sweep:
+      - links:
+          - from: A
+            to: B
+            compression: llmint8
+            rates: [0.01, 0.05, 0.1, 0.25]
+            outlier_precision: int8
+            regular_precision: int4
+          - from: B
+            to: C
+            compression: llmint8
+            rates: [0.01, 0.05, 0.1, 0.25]
+            outlier_precision: int8
+            regular_precision: int4
+
+  llmint8_llmint8_int8_int2:
+    baselines:
+      - spec: resnet56/single-node
+        sub_experiment: baseline
+        profile: single-node/default
+      - sub_experiment: baseline
+      - sub_experiment: topk_topk
+      - sub_experiment: topk_quantization
+      - sub_experiment: topk_llmint8
+      - sub_experiment: quantization_topk
+      - sub_experiment: quantization_quantization
+      - sub_experiment: quantization_llmint8
+      - sub_experiment: llmint8_topk
+      - sub_experiment: llmint8_quantization
+      - sub_experiment: llmint8_llmint8_fp16_fp16
+      - sub_experiment: llmint8_llmint8_fp16_int8
+      - sub_experiment: llmint8_llmint8_fp16_int4
+      - sub_experiment: llmint8_llmint8_fp16_int2
+      - sub_experiment: llmint8_llmint8_int8_fp16
+      - sub_experiment: llmint8_llmint8_int8_int8
+      - sub_experiment: llmint8_llmint8_int8_int4
+    sweep_mode: product
+    sweep:
+      - links:
+          - from: A
+            to: B
+            compression: llmint8
+            rates: [0.01, 0.05, 0.1, 0.25]
+            outlier_precision: int8
+            regular_precision: int2
+          - from: B
+            to: C
+            compression: llmint8
+            rates: [0.01, 0.05, 0.1, 0.25]
+            outlier_precision: int8
+            regular_precision: int2
