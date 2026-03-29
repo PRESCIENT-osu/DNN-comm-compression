@@ -290,6 +290,16 @@ def _node_pod(
         },
         "spec": {
             "hostname": node_cfg.host,
+            "affinity": {
+                "podAntiAffinity": {
+                    "requiredDuringSchedulingIgnoredDuringExecution": [
+                        {
+                            "labelSelector": {"matchLabels": {"experiment": exp.name}},
+                            "topologyKey": "kubernetes.io/hostname",
+                        }
+                    ]
+                }
+            },
             "containers": [container],
             "volumes": [
                 {
