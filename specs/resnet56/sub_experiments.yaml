@@ -14,7 +14,7 @@ sub_experiments:
       - sub_experiment: baseline
       - spec: resnet56/single-node
         sub_experiment: baseline
-        profile: resnet56/single-node/default
+        profile: single-node/default
     sweep_mode: paired
     sweep:
       - links:
@@ -32,7 +32,7 @@ sub_experiments:
       - sub_experiment: baseline
       - spec: resnet56/single-node
         sub_experiment: baseline
-        profile: resnet56/single-node/default
+        profile: single-node/default
     sweep_mode: product
     sweep:
       - links:

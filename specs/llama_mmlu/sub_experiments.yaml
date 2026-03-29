@@ -1,0 +1,28 @@
+sub_experiments:
+
+  baseline:
+    links:
+      - from: A
+        to: B
+        compression: none
+      - from: B
+        to: C
+        compression: none
+
+  topk:
+    baselines:
+      - sub_experiment: baseline
+      - spec: llama/single-node
+        sub_experiment: baseline
+        profile: single-node/default
+    sweep_mode: pair
+    sweep:
+      - links:
+          - from: A
+            to: B
+            compression: topk
+            rates: [0.1, 0.3, 0.5, 0.7]
+          - from: B
+            to: C
+            compression: topk
+            rates: [0.1, 0.3, 0.5, 0.7]

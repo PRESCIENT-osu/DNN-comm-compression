@@ -1,0 +1,5 @@
+nodes:
+  - name: A
+    host: llama-a
+    port: 8000
+    partitions: [p1, p2, p3]

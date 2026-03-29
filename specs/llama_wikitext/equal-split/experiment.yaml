@@ -1,0 +1,13 @@
+nodes:
+  - name: A
+    host: llama-a
+    port: 8000
+    partitions: [p1]
+  - name: B
+    host: llama-b
+    port: 8001
+    partitions: [p2]
+  - name: C
+    host: llama-c
+    port: 8002
+    partitions: [p3]

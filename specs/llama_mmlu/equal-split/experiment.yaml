@@ -1,13 +1,13 @@
 nodes:
-  - name: early
-    host: llama-early
+  - name: A
+    host: llama-a
     port: 8000
     partitions: [p1]
-  - name: middle
-    host: llama-middle
+  - name: B
+    host: llama-b
     port: 8001
     partitions: [p2]
-  - name: late
-    host: llama-late
+  - name: C
+    host: llama-c
     port: 8002
     partitions: [p3]

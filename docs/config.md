@@ -8,12 +8,12 @@ Experiments are defined using a two-axis structure that separates *what* runs fr
 These two axes are composed by `tools/generate.py` to produce a fully resolved experiment directory under `experiments/` (which is gitignored). The orchestrator runs directly against the generated output.
 
 ```
-specs/                     ← what (model, partitions, compression)
-profiles/                  ← where (resources, network, addresses)
-         ↘         ↙
-      tools/generate.py
-             ↓
-       experiments/        ← generated, gitignored
+specs/                      ← what (model, partitions, compression)
+profiles/                   ← where (resources, network, addresses)
+          ↘          ↙
+       tools/generate.py
+              ↓
+        experiments/        ← generated, gitignored
 ```
 
 ---
@@ -95,7 +95,7 @@ sub_experiments:
       - sub_experiment: baseline
       - spec: resnet56/single-node
         sub_experiment: baseline
-        profile: resnet56/single-node/default
+        profile: single-node/default
     sweep_mode: paired
     sweep:
       - links:
@@ -127,34 +127,27 @@ A sub-experiment uses either `links` (for a fixed single run) or `sweep` (for mu
 
 ### Directory structure
 
-Profiles are organized by model and topology under `profiles/`:
+Profiles are organized by topology under `profiles/`:
 
 ```
 profiles/
-  {model}/
-    {topology}/
-      {name}.yaml
+  {topology}/
+    {name}.yaml
 ```
 
 For example:
 
 ```
 profiles/
-  resnet56/
-    single-node/
-      default.yaml
-    linear-3/
-      default.yaml     ← 1 Gbps LAN
-      100mbps.yaml     ← 100 Mbps WAN
-      wan.yaml         ← WAN with delay/jitter/loss + resource constraints
-  llama/
-    single-node/
-      default.yaml
-    linear-3/
-      default.yaml
+  single-node/
+    default.yaml
+  linear-3/
+    default.yaml     ← 1 Gbps LAN
+    100mbps.yaml     ← 100 Mbps WAN
+    wan.yaml         ← WAN with delay/jitter/loss + resource constraints
 ```
 
-A profile bundles the physical/network properties of a deployment topology: node addresses and ports, CPU/GPU/memory resource limits, and link traffic shaping (bandwidth, delay, jitter, loss). Profiles for different models use different node names matching their respective specs (e.g. `A/B/C` for resnet56, `early/middle/late` for Llama).
+A profile bundles the physical/network properties of a deployment topology: node addresses and ports, CPU/GPU/memory resource limits, and link traffic shaping (bandwidth, delay, jitter, loss). Profiles are model-agnostic — any model whose spec uses the same node names (`A`, `B`, `C`, …) can use the same profile.
 
 ### Profile file format
 
@@ -189,19 +182,19 @@ Use `tools/generate.py` to compose a spec and profile into a runnable experiment
 
 ```bash
 python tools/generate.py \
-    --spec resnet56/equal-split \
-    --profile resnet56/linear-3/100mbps
+    --spec specs/resnet56/equal-split \
+    --profile profiles/linear-3/100mbps.yaml
 
 # Include only specific sub-experiments
 python tools/generate.py \
-    --spec resnet56/equal-split \
-    --profile resnet56/linear-3/100mbps \
+    --spec specs/resnet56/equal-split \
+    --profile profiles/linear-3/100mbps.yaml \
     --sub-experiments baseline topk_paired
 
 # Custom output directory
 python tools/generate.py \
-    --spec resnet56/equal-split \
-    --profile resnet56/linear-3/100mbps \
+    --spec specs/resnet56/equal-split \
+    --profile profiles/linear-3/100mbps.yaml \
     --output-dir /tmp/experiments
 ```
 

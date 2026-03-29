@@ -52,8 +52,8 @@ Generate the experiment directory first using `tools/generate.py` (see [docs/con
 ```bash
 # 1. Generate the experiment
 python tools/generate.py \
-    --spec resnet56/equal-split \
-    --profile resnet56/linear-3/100mbps
+    --spec specs/resnet56/equal-split \
+    --profile profiles/linear-3/100mbps.yaml
 
 # 2. Deploy the generated experiment
 python -m framework.deploy \
@@ -165,7 +165,7 @@ links:
     bandwidth_mbps: 10
 ```
 
-In the new workflow, network and resource variations are expressed as separate profiles (e.g. `profiles/resnet56/linear-3/100mbps.yaml`, `profiles/resnet56/linear-3/wan.yaml`) and selected at generation time via `tools/generate.py --profile`. The deploy tool resolves infra inheritance before generating manifests. Run `make validate` to check configs before deploying.
+In the new workflow, network and resource variations are expressed as separate profiles (e.g. `profiles/linear-3/100mbps.yaml`, `profiles/linear-3/wan.yaml`) and selected at generation time via `tools/generate.py --profile`. The deploy tool resolves infra inheritance before generating manifests. Run `make validate` to check configs before deploying.
 
 ## Node Ports Convention
 
