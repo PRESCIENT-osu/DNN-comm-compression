@@ -79,14 +79,13 @@ class LlamaPartition1(nn.Module):
         )
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
         for layer in self.layers:
-            out = layer(
+            hidden_states = layer(
                 hidden_states,
                 attention_mask=None,
                 position_ids=position_ids,
                 position_embeddings=position_embeddings,
                 use_cache=False,
             )
-            hidden_states = out[0]
         return hidden_states
 
 
@@ -118,14 +117,13 @@ class LlamaPartition2(nn.Module):
         )
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
         for layer in self.layers:
-            out = layer(
+            hidden_states = layer(
                 hidden_states,
                 attention_mask=None,
                 position_ids=position_ids,
                 position_embeddings=position_embeddings,
                 use_cache=False,
             )
-            hidden_states = out[0]
         return hidden_states
 
 
@@ -167,14 +165,13 @@ class LlamaPartition3(nn.Module):
         )
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
         for layer in self.layers:
-            out = layer(
+            hidden_states = layer(
                 hidden_states,
                 attention_mask=None,
                 position_ids=position_ids,
                 position_embeddings=position_embeddings,
                 use_cache=False,
             )
-            hidden_states = out[0]
         hidden_states = self.norm(hidden_states)
         return self.lm_head(hidden_states)
 
