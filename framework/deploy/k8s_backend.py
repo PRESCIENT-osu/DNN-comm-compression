@@ -68,8 +68,8 @@ def generate(
     metrics_image = _derive_image(image, "metrics")
     orchestrator_image = _derive_image(image, "orchestrator")
     dataset_container_path = _abs_container_path(exp.dataset.path)
+    experiments_dir = experiment_config_path.parent.parent
 
-    docs.append(_configmap(exp, experiment_config_path, namespace))
     docs.append(_metrics_pod(exp, infra, metrics_image, metrics_data_dir, namespace))
     docs.append(_metrics_service(exp, infra, namespace))
 
@@ -90,6 +90,7 @@ def generate(
                 exp=exp,
                 image=image,
                 partitions_dir=partitions_dir,
+                experiments_dir=experiments_dir,
                 namespace=namespace,
                 outgoing_links=outgoing_links.get(node.name, []),
                 node_host_map=node_host_map,
@@ -118,21 +119,6 @@ def generate(
 # ---------------------------------------------------------------------------
 # Resource builders
 # ---------------------------------------------------------------------------
-
-
-def _configmap(
-    exp: ExperimentConfig,
-    experiment_config_path: Path,
-    namespace: str,
-) -> dict[str, Any]:
-    with open(experiment_config_path) as f:
-        config_content = f.read()
-    return {
-        "apiVersion": "v1",
-        "kind": "ConfigMap",
-        "metadata": {"name": f"{exp.name}-config", "namespace": namespace},
-        "data": {"experiment.yaml": config_content},
-    }
 
 
 def _metrics_pod(
@@ -214,6 +200,7 @@ def _node_pod(
     exp: ExperimentConfig,
     image: str,
     partitions_dir: Path,
+    experiments_dir: Path,
     namespace: str,
     outgoing_links: list[InfraLinkConfig],
     node_host_map: dict[str, str],
@@ -223,7 +210,10 @@ def _node_pod(
 
     env = [
         {"name": "NODE_NAME", "value": node_cfg.name},
-        {"name": "EXPERIMENT_CONFIG_PATH", "value": "/app/config/experiment.yaml"},
+        {
+            "name": "EXPERIMENT_CONFIG_PATH",
+            "value": f"/app/experiments/{exp.name}/experiment.yaml",
+        },
         {"name": "PARTITIONS_DIR", "value": "/app/.partitions"},
         {
             "name": "METRICS_SERVER_URL",
@@ -278,8 +268,8 @@ def _node_pod(
                 "readOnly": True,
             },
             {
-                "name": "experiment-config",
-                "mountPath": "/app/config",
+                "name": "experiments",
+                "mountPath": "/app/experiments",
                 "readOnly": True,
             },
         ],
@@ -305,8 +295,8 @@ def _node_pod(
                     "hostPath": {"path": str(partitions_dir.resolve())},
                 },
                 {
-                    "name": "experiment-config",
-                    "configMap": {"name": f"{exp.name}-config"},
+                    "name": "experiments",
+                    "hostPath": {"path": str(experiments_dir.resolve())},
                 },
             ],
         },
