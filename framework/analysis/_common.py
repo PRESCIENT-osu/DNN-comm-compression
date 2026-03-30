@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -44,12 +45,56 @@ def load_records(
         run_id = event.get("run_id")
         if run_id is None:
             continue
+        # Skip perplexity records — they carry nll_sum/token_count, not predictions.
+        if event.get("nll_sum") is not None:
+            continue
         # ResultEvent stores ground truth as 'actual'; normalise to 'ground_truth'
         if "actual" in event and "ground_truth" not in event:
             event = dict(event)
             event["ground_truth"] = event["actual"]
         run_records.setdefault(run_id, []).append(event)
     return run_records
+
+
+def load_perplexity_records(
+    metrics_dir: Path, experiment_id: str
+) -> dict[str, list[dict[str, Any]]]:
+    """Load per-run perplexity records from result.ndjson in the metrics store.
+
+    Args:
+        metrics_dir: Root metrics directory (parent of experiment subdirectories).
+        experiment_id: Experiment name used as subdirectory within metrics_dir.
+
+    Returns:
+        Mapping of run_id to list of record dicts with ``nll_sum`` and
+        ``token_count`` fields suitable for :func:`compute_perplexity`.
+    """
+    path = metrics_dir / experiment_id / "result.ndjson"
+    run_records: dict[str, list[dict[str, Any]]] = {}
+    for event in load_ndjson(path):
+        run_id = event.get("run_id")
+        if run_id is None:
+            continue
+        if event.get("nll_sum") is None:
+            continue
+        run_records.setdefault(run_id, []).append(event)
+    return run_records
+
+
+def compute_perplexity(records: list[dict[str, Any]]) -> float | None:
+    """Compute perplexity from a list of per-batch NLL records.
+
+    Args:
+        records: List of record dicts with ``nll_sum`` and ``token_count`` fields.
+
+    Returns:
+        Perplexity, or None if records is empty or token_count sums to zero.
+    """
+    total_nll = sum(r["nll_sum"] for r in records)
+    total_tokens = sum(r["token_count"] for r in records)
+    if total_tokens == 0:
+        return None
+    return math.exp(total_nll / total_tokens)
 
 
 def compute_accuracy(records: list[dict[str, Any]]) -> float | None:

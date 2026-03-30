@@ -145,6 +145,7 @@ class _MMLUBatches:
 
         self._items = items
         self._tokenizer = tokenizer
+        self._tokenizer.padding_side = "left"
         self._batch_size = config.batch_size
 
     def _format(self, item: dict[str, Any]) -> str:
@@ -333,8 +334,8 @@ class LlamaDataClient:
                             experiment_id=exp.name,
                             run_id=run_id,
                             request_id=task_id,
-                            predicted=[],
-                            actual=[],
+                            nll_sum=nll_sum,
+                            token_count=token_count,
                         )
                     )
                 else:  # mmlu

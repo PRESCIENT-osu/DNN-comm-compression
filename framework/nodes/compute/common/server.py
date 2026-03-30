@@ -360,7 +360,9 @@ async def _send_result(task_id: str, callback_url: str, result_bytes: bytes) -> 
         "task_id": task_id,
         "data": base64.b64encode(result_bytes).decode(),
     }
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    # Large Llama logit tensors can take >30s to write; use a generous write timeout.
+    timeout = httpx.Timeout(connect=10.0, write=120.0, read=30.0, pool=5.0)
+    async with httpx.AsyncClient(timeout=timeout) as client:
         resp = await client.post(callback_url, json=payload)
         resp.raise_for_status()
 
