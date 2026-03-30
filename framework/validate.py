@@ -12,9 +12,11 @@ from framework.nodes.orchestrator.runner import _sub_experiment_to_exp_config
 from framework.utils.loader import (
     check_infra_fairness,
     is_generated_experiment,
+    is_multi_experiment,
     load_experiment_dir,
     load_generated_experiment_config,
     load_infra_config,
+    load_multi_experiment_config,
 )
 
 logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
@@ -77,7 +79,42 @@ def validate(experiment_dir: Path, show_runs: bool) -> bool:
 
     print(f"Validating: {experiment_dir}")
 
-    if is_generated_experiment(exp_yaml):
+    if is_multi_experiment(exp_yaml):
+        try:
+            multi = load_multi_experiment_config(exp_yaml)
+        except (FileNotFoundError, ValidationError, Exception) as e:
+            print(f"  ERROR: {e}")
+            return False
+
+        print(f"  experiment : {multi.name}")
+        print(f"  pipelines  : {', '.join(p.name for p in multi.pipelines)}")
+        print(f"  nodes      : {' -> '.join(n.name for n in multi.nodes)}")
+
+        for sub_exp in multi.sub_experiments:
+            print(f"  [{sub_exp.name}]")
+            try:
+                runs = multi.resolve_sweep(sub_exp)
+                print(f"    sweep runs : {len(runs)}")
+                if show_runs:
+                    for run in runs:
+                        link_summary = ", ".join(
+                            f"{lk.pipeline_id} {lk.from_node}->{lk.to_node} "
+                            f"{lk.compression.value}"
+                            + (
+                                f"@{lk.rate:.2f}"
+                                if lk.compression.value != "none"
+                                else ""
+                            )
+                            for lk in run.links
+                        )
+                        print(
+                            f"      [{run.run_id[:60]}...] {link_summary if link_summary else 'no links'}"
+                        )
+            except ValueError as e:
+                print(f"    ERROR in sweep expansion: {e}")
+                ok = False
+
+    elif is_generated_experiment(exp_yaml):
         try:
             generated = load_generated_experiment_config(exp_yaml)
         except (FileNotFoundError, ValidationError, Exception) as e:

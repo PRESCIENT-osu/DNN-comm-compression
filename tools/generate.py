@@ -23,7 +23,16 @@ Usage::
     # All combinations with validation and run listing
     python tools/generate.py --all --validate --show-runs
 
-Output is written to experiments/<name>/ which should be gitignored.
+    # Single multi-model experiment
+    python tools/generate.py --multi \\
+        --spec multispecs/resnet56_llama \\
+        --profile profiles/linear-3-bidir/100mbps.yaml
+
+    # All compatible multi-model spec/profile combinations
+    python tools/generate.py --multi --all
+
+Output is written to experiments/<name>/ (single-model) or
+experiments/multi/<name>/ (multi-model).
 """
 
 from __future__ import annotations
@@ -40,8 +49,10 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
 SPECS_DIR = Path("specs")
+MULTISPECS_DIR = Path("multispecs")
 PROFILES_DIR = Path("profiles")
 EXPERIMENTS_DIR = Path("experiments")
+MULTI_EXPERIMENTS_DIR = Path("experiments") / "multi"
 
 
 # ---------------------------------------------------------------------------
@@ -403,6 +414,256 @@ def _generate_all(
 
 
 # ---------------------------------------------------------------------------
+# Multi-model generation
+# ---------------------------------------------------------------------------
+
+
+def load_multi_spec(spec_dir: Path) -> dict[str, Any]:
+    """Load a multi-model spec from multispecs/<name>/experiment.yaml.
+
+    Unlike single-model specs, multi-model specs are flat — no hierarchical
+    merge is performed.
+
+    Args:
+        spec_dir: Path to the multispec directory (e.g. multispecs/resnet56_llama).
+
+    Returns:
+        Spec config dict.
+
+    Raises:
+        FileNotFoundError: If experiment.yaml is not found in spec_dir.
+    """
+    yaml_path = spec_dir / "experiment.yaml"
+    if not yaml_path.exists():
+        raise FileNotFoundError(f"Multi-model spec not found: {yaml_path}")
+    return _load_yaml(yaml_path)
+
+
+def load_multi_sub_experiments(spec_dir: Path) -> dict[str, Any]:
+    """Load sub-experiments from multispecs/<name>/sub_experiments.yaml.
+
+    Args:
+        spec_dir: Path to the multispec directory.
+
+    Returns:
+        Dict of sub-experiment name → sub-experiment config dict.
+
+    Raises:
+        FileNotFoundError: If sub_experiments.yaml is not found.
+    """
+    yaml_path = spec_dir / "sub_experiments.yaml"
+    if not yaml_path.exists():
+        raise FileNotFoundError(f"Multi-model sub_experiments not found: {yaml_path}")
+    data = _load_yaml(yaml_path)
+    return data.get("sub_experiments", {})
+
+
+def validate_multi_compatibility(spec: dict[str, Any], profile: dict[str, Any]) -> None:
+    """Ensure node names in multi-model spec and profile match exactly.
+
+    In multi-model specs, nodes is a list of name strings rather than full
+    node config dicts.
+
+    Args:
+        spec: Multi-model spec dict (nodes is a list of name strings).
+        profile: Profile dict.
+
+    Raises:
+        ValueError: If node name sets differ.
+    """
+    spec_nodes = set(spec.get("nodes", []))
+    profile_nodes = {n["name"] for n in profile.get("nodes", [])}
+    if not profile_nodes:
+        return
+    if spec_nodes != profile_nodes:
+        raise ValueError(
+            f"Node name mismatch between multi-model spec and profile.\n"
+            f"  Spec nodes:    {sorted(spec_nodes)}\n"
+            f"  Profile nodes: {sorted(profile_nodes)}"
+        )
+
+
+def derive_multi_name(spec_dir: Path, profile_file: Path) -> str:
+    """Derive the canonical experiment name for a multi-model experiment.
+
+    Format: {spec_name}_{topology}_{profile_name}
+
+    Args:
+        spec_dir: Path to the multispec directory (e.g. multispecs/resnet56_llama).
+        profile_file: Path to the profile YAML file (e.g. profiles/linear-3-bidir/100mbps.yaml).
+
+    Returns:
+        Experiment name string.
+    """
+    spec_name = spec_dir.relative_to(MULTISPECS_DIR).parts[0]
+    profile_parts = profile_file.relative_to(PROFILES_DIR).parts
+    topology = profile_parts[0]
+    profile_name = profile_file.stem
+    return f"{spec_name}_{topology}_{profile_name}"
+
+
+def _materialise_multi(
+    spec_dir: Path,
+    profile_file: Path,
+    output_dir: Path,
+    sub_experiment_filter: list[str] | None = None,
+) -> Path:
+    """Generate one multi-model experiment directory.
+
+    Merges the multi-model spec with a profile to produce a fully resolved
+    experiment.yaml and infra.yaml in experiments/multi/<name>/.
+
+    Node host/port values are taken from the profile; the spec provides only
+    node names.  Sub-experiment baselines are stored as-is (already resolved
+    strings of the form 'experiment_name/sub_experiment_name').
+
+    Args:
+        spec_dir: Path to the multispec directory (e.g. multispecs/resnet56_llama).
+        profile_file: Path to the profile YAML file.
+        output_dir: Root directory for generated multi-model experiments.
+        sub_experiment_filter: If set, only include these sub-experiment names.
+
+    Returns:
+        Path to the generated experiment directory.
+    """
+    spec = load_multi_spec(spec_dir)
+    all_sub_experiments = load_multi_sub_experiments(spec_dir)
+    profile = load_profile(profile_file)
+
+    validate_multi_compatibility(spec, profile)
+
+    exp_name = derive_multi_name(spec_dir, profile_file)
+
+    if sub_experiment_filter:
+        missing = set(sub_experiment_filter) - set(all_sub_experiments)
+        if missing:
+            raise ValueError(
+                f"Sub-experiments not found in spec '{spec_dir}': {sorted(missing)}\n"
+                f"Available: {sorted(all_sub_experiments)}"
+            )
+        selected = {
+            k: v for k, v in all_sub_experiments.items() if k in sub_experiment_filter
+        }
+    else:
+        selected = all_sub_experiments
+
+    # Build node configs by merging spec node names with profile host/port
+    profile_node_map = {n["name"]: n for n in profile.get("nodes", [])}
+    nodes: list[dict[str, Any]] = []
+    for node_name in spec.get("nodes", []):
+        profile_node = profile_node_map.get(node_name, {})
+        nodes.append(
+            {
+                "name": node_name,
+                "host": profile_node.get("host", node_name),
+                "port": profile_node.get("port", 8000),
+            }
+        )
+
+    # Resolve sub-experiments (baselines are already resolved strings)
+    resolved_sub_experiments: list[dict[str, Any]] = []
+    for name, sub_exp in selected.items():
+        entry: dict[str, Any] = {"name": name}
+        if sub_exp.get("links"):
+            entry["links"] = sub_exp["links"]
+        if sub_exp.get("sweep"):
+            entry["sweep_mode"] = sub_exp.get("sweep_mode", "paired")
+            entry["sweep"] = sub_exp["sweep"]
+        if sub_exp.get("baselines"):
+            entry["baselines"] = sub_exp["baselines"]
+        resolved_sub_experiments.append(entry)
+
+    # Build generated experiment.yaml
+    generated: dict[str, Any] = {
+        "name": exp_name,
+        "nodes": nodes,
+        "pipelines": spec["pipelines"],
+        "datasets": spec["datasets"],
+        "workload": spec["workload"],
+        "metrics_server": spec["metrics_server"],
+        "sub_experiments": resolved_sub_experiments,
+    }
+
+    exp_dir = output_dir / exp_name
+    exp_dir.mkdir(parents=True, exist_ok=True)
+
+    _dump_yaml(generated, exp_dir / "experiment.yaml")
+    _dump_yaml(profile, exp_dir / "infra.yaml")
+
+    logger.info("Generated multi-model experiment: %s", exp_dir)
+    return exp_dir
+
+
+def _leaf_multi_specs() -> list[Path]:
+    """Return all multispec directories that have both experiment.yaml and sub_experiments.yaml.
+
+    Returns:
+        Sorted list of valid multispec directory paths.
+    """
+    if not MULTISPECS_DIR.exists():
+        return []
+    candidates = sorted(
+        p.parent
+        for p in MULTISPECS_DIR.rglob("experiment.yaml")
+        if (p.parent / "sub_experiments.yaml").exists()
+    )
+    return candidates
+
+
+def _generate_all_multi(
+    output_dir: Path,
+    sub_experiment_filter: list[str] | None = None,
+) -> list[Path]:
+    """Generate experiments for all compatible multispec/profile pairs.
+
+    Skips incompatible combinations (node name mismatches) silently.
+
+    Args:
+        output_dir: Root directory for generated multi-model experiments.
+        sub_experiment_filter: If set, include only these sub-experiment names.
+
+    Returns:
+        List of generated experiment directory paths.
+    """
+    specs = _leaf_multi_specs()
+    profiles = sorted(PROFILES_DIR.rglob("*.yaml"))
+
+    logger.info(
+        "Found %d multi-model spec(s) and %d profile(s) — trying %d combination(s)",
+        len(specs),
+        len(profiles),
+        len(specs) * len(profiles),
+    )
+
+    generated: list[Path] = []
+    skipped = 0
+
+    for spec in specs:
+        for profile in profiles:
+            try:
+                exp_dir = _materialise_multi(
+                    spec, profile, output_dir, sub_experiment_filter
+                )
+                generated.append(exp_dir)
+            except ValueError as e:
+                if "Node name mismatch" in str(e) or "Sub-experiments not found" in str(
+                    e
+                ):
+                    skipped += 1
+                else:
+                    logger.error("Failed %s + %s: %s", spec, profile, e)
+            except (FileNotFoundError, KeyError) as e:
+                logger.error("Failed %s + %s: %s", spec, profile, e)
+
+    logger.info(
+        "Generated %d multi-model experiment(s), skipped %d incompatible combination(s)",
+        len(generated),
+        skipped,
+    )
+    return generated
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -412,8 +673,16 @@ def main() -> None:
         description=(
             "Generate fully resolved experiment directories from specs and profiles. "
             "Use --spec/--profile for a single experiment or --all for every "
-            "compatible combination."
+            "compatible combination.  Add --multi to operate on multispecs/ instead."
         )
+    )
+    parser.add_argument(
+        "--multi",
+        action="store_true",
+        help=(
+            "Generate multi-model experiments from multispecs/ "
+            "(output goes to experiments/multi/ by default)"
+        ),
     )
     parser.add_argument(
         "--all",
@@ -423,7 +692,10 @@ def main() -> None:
     parser.add_argument(
         "--spec",
         type=Path,
-        help="Path to the spec directory (e.g. specs/resnet56/equal-split)",
+        help=(
+            "Path to the spec directory "
+            "(e.g. specs/resnet56/equal-split or multispecs/resnet56_llama)"
+        ),
     )
     parser.add_argument(
         "--profile",
@@ -439,8 +711,12 @@ def main() -> None:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=EXPERIMENTS_DIR,
-        help=f"Root output directory (default: {EXPERIMENTS_DIR})",
+        default=None,
+        help=(
+            f"Root output directory "
+            f"(default: {EXPERIMENTS_DIR} for single-model, "
+            f"{MULTI_EXPERIMENTS_DIR} for --multi)"
+        ),
     )
     parser.add_argument(
         "--validate",
@@ -457,6 +733,10 @@ def main() -> None:
     if args.show_runs:
         args.validate = True
 
+    output_dir = args.output_dir or (
+        MULTI_EXPERIMENTS_DIR if args.multi else EXPERIMENTS_DIR
+    )
+
     if args.all and (args.spec or args.profile):
         print("ERROR: --all cannot be used with --spec or --profile", file=sys.stderr)
         sys.exit(1)
@@ -465,24 +745,46 @@ def main() -> None:
         print("ERROR: provide --spec and --profile, or use --all", file=sys.stderr)
         sys.exit(1)
 
-    if args.all:
-        generated = _generate_all(args.output_dir, args.sub_experiments)
-        if not generated:
-            print("ERROR: no experiments were generated", file=sys.stderr)
-            sys.exit(1)
+    if args.multi:
+        if args.all:
+            generated = _generate_all_multi(output_dir, args.sub_experiments)
+            if not generated:
+                print(
+                    "ERROR: no multi-model experiments were generated", file=sys.stderr
+                )
+                sys.exit(1)
+        else:
+            try:
+                exp_dir = _materialise_multi(
+                    spec_dir=args.spec,
+                    profile_file=args.profile,
+                    output_dir=output_dir,
+                    sub_experiment_filter=args.sub_experiments,
+                )
+                print(exp_dir)
+                generated = [exp_dir]
+            except (FileNotFoundError, ValueError, KeyError) as exc:
+                print(f"ERROR: {exc}", file=sys.stderr)
+                sys.exit(1)
     else:
-        try:
-            exp_dir = _materialise(
-                spec_dir=args.spec,
-                profile_file=args.profile,
-                output_dir=args.output_dir,
-                sub_experiment_filter=args.sub_experiments,
-            )
-            print(exp_dir)
-            generated = [exp_dir]
-        except (FileNotFoundError, ValueError) as exc:
-            print(f"ERROR: {exc}", file=sys.stderr)
-            sys.exit(1)
+        if args.all:
+            generated = _generate_all(output_dir, args.sub_experiments)
+            if not generated:
+                print("ERROR: no experiments were generated", file=sys.stderr)
+                sys.exit(1)
+        else:
+            try:
+                exp_dir = _materialise(
+                    spec_dir=args.spec,
+                    profile_file=args.profile,
+                    output_dir=output_dir,
+                    sub_experiment_filter=args.sub_experiments,
+                )
+                print(exp_dir)
+                generated = [exp_dir]
+            except (FileNotFoundError, ValueError) as exc:
+                print(f"ERROR: {exc}", file=sys.stderr)
+                sys.exit(1)
 
     if args.validate:
         from framework.validate import validate

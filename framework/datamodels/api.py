@@ -31,3 +31,26 @@ class ResultPayload(BaseModel):
 
     task_id: str
     data: str  # base64-encoded pickled output tensor
+
+
+class MultiInferRequest(BaseModel):
+    """Payload for POST /infer on a multi-model compute node."""
+
+    task_id: str
+    pipeline_id: str
+    callback_url: str
+    experiment_id: str
+    run_id: str
+    data: str  # base64-encoded bytes (compressed activation or raw input)
+
+
+class MultiConfigUpdate(BaseModel):
+    """Payload for POST /config on a multi-model compute node."""
+
+    pipeline_id: str
+    direction: str  # "incoming" or "outgoing"
+    method: CompressionMethod
+    rate: float = 0.0
+    drain_timeout_s: float = 60.0
+    outlier_precision: str = "fp16"
+    regular_precision: str = "int8"

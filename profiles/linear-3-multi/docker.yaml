@@ -1,0 +1,10 @@
+nodes:
+  - name: A
+    host: multi-a
+    port: 8000
+  - name: B
+    host: multi-b
+    port: 8000
+  - name: C
+    host: multi-c
+    port: 8000

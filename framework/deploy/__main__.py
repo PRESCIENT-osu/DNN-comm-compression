@@ -7,7 +7,11 @@ import sys
 from pathlib import Path
 
 from framework.deploy import docker_backend, k8s_backend
-from framework.utils.loader import load_experiment_dir
+from framework.utils.loader import (
+    load_experiment_dir,
+    load_infra_config,
+    load_multi_experiment_config,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -38,13 +42,17 @@ def main() -> None:
     parser.add_argument(
         "--image",
         default="dnn-compression:latest",
-        help="Container image name (default: dnn-compression:latest)",
+        help="Container image name / tag (default: dnn-compression:latest)",
     )
     parser.add_argument(
         "--partitions-dir",
         type=Path,
         required=True,
-        help="Host path to the model .partitions directory",
+        help=(
+            "Single-model: host path to the model .partitions directory. "
+            "Multi-model (--multi): host path to the partitions base directory "
+            "containing {model_name}/ subdirectories."
+        ),
     )
     parser.add_argument(
         "--metrics-dir",
@@ -55,13 +63,21 @@ def main() -> None:
     parser.add_argument(
         "--dataset-dir",
         type=Path,
-        required=True,
-        help="Host path to the dataset directory",
+        help=(
+            "Single-model: host path to the dataset directory. "
+            "Multi-model (--multi): host path to the base .datasets directory "
+            "containing all dataset subdirectories."
+        ),
     )
     parser.add_argument(
         "--namespace",
         default="default",
         help="Kubernetes namespace (k8s target only, default: default)",
+    )
+    parser.add_argument(
+        "--multi",
+        action="store_true",
+        help="Generate manifests for a multi-model experiment (experiments/multi/)",
     )
     parser.add_argument(
         "--apply",
@@ -74,57 +90,114 @@ def main() -> None:
         logger.error("Experiment directory not found: %s", args.experiment)
         sys.exit(1)
 
-    exp, infra = load_experiment_dir(args.experiment)
     experiment_config_path = args.experiment / "experiment.yaml"
     deploy_dir = args.experiment / "deploy"
     deploy_dir.mkdir(parents=True, exist_ok=True)
+    infra = load_infra_config(args.experiment / "infra.yaml")
 
-    if args.target == "docker":
-        content = docker_backend.generate(
-            exp=exp,
-            infra=infra,
-            image=args.image,
-            partitions_dir=args.partitions_dir,
-            metrics_data_dir=args.metrics_dir,
-            experiment_config_path=experiment_config_path,
-            dataset_dir=args.dataset_dir,
-        )
-        out_path = deploy_dir / "docker-compose.yml"
-        out_path.write_text(content)
-        logger.info("Generated: %s", out_path)
+    if args.multi:
+        exp = load_multi_experiment_config(experiment_config_path)
 
-        if args.apply:
-            logger.info("Running: docker compose up -d")
-            subprocess.run(
-                ["docker", "compose", "up", "-d"],
-                cwd=deploy_dir,
-                check=True,
+        if args.dataset_dir is None:
+            logger.error("--dataset-dir is required for multi-model experiments")
+            sys.exit(1)
+
+        if args.target == "docker":
+            content = docker_backend.generate_multi(
+                exp=exp,
+                infra=infra,
+                image=args.image,
+                partitions_base_dir=args.partitions_dir,
+                metrics_data_dir=args.metrics_dir,
+                experiment_config_path=experiment_config_path,
+                dataset_base_dir=args.dataset_dir,
             )
+            out_path = deploy_dir / "docker-compose.yml"
+            out_path.write_text(content)
+            logger.info("Generated: %s", out_path)
 
-    elif args.target == "k8s":
-        content = k8s_backend.generate(
-            exp=exp,
-            infra=infra,
-            image=args.image,
-            partitions_dir=args.partitions_dir,
-            metrics_data_dir=args.metrics_dir,
-            experiment_config_path=experiment_config_path,
-            namespace=args.namespace,
-            dataset_dir=args.dataset_dir,
-        )
-        out_path = deploy_dir / "manifests.yaml"
-        out_path.write_text(content)
-        logger.info("Generated: %s", out_path)
+            if args.apply:
+                logger.info("Running: docker compose up -d")
+                subprocess.run(
+                    ["docker", "compose", "up", "-d"],
+                    cwd=deploy_dir,
+                    check=True,
+                )
 
-        if args.apply:
-            logger.info(
-                "Running: kubectl apply -f manifests.yaml -n %s", args.namespace
+        elif args.target == "k8s":
+            content = k8s_backend.generate_multi(
+                exp=exp,
+                infra=infra,
+                image=args.image,
+                partitions_base_dir=args.partitions_dir,
+                metrics_data_dir=args.metrics_dir,
+                experiment_config_path=experiment_config_path,
+                namespace=args.namespace,
+                dataset_base_dir=args.dataset_dir,
             )
-            subprocess.run(
-                ["kubectl", "apply", "-f", "manifests.yaml", "-n", args.namespace],
-                cwd=deploy_dir,
-                check=True,
+            out_path = deploy_dir / "manifests.yaml"
+            out_path.write_text(content)
+            logger.info("Generated: %s", out_path)
+
+            if args.apply:
+                logger.info(
+                    "Running: kubectl apply -f manifests.yaml -n %s", args.namespace
+                )
+                subprocess.run(
+                    ["kubectl", "apply", "-f", "manifests.yaml", "-n", args.namespace],
+                    cwd=deploy_dir,
+                    check=True,
+                )
+
+    else:
+        exp_single, _infra = load_experiment_dir(args.experiment)
+
+        if args.target == "docker":
+            content = docker_backend.generate(
+                exp=exp_single,
+                infra=infra,
+                image=args.image,
+                partitions_dir=args.partitions_dir,
+                metrics_data_dir=args.metrics_dir,
+                experiment_config_path=experiment_config_path,
+                dataset_dir=args.dataset_dir,
             )
+            out_path = deploy_dir / "docker-compose.yml"
+            out_path.write_text(content)
+            logger.info("Generated: %s", out_path)
+
+            if args.apply:
+                logger.info("Running: docker compose up -d")
+                subprocess.run(
+                    ["docker", "compose", "up", "-d"],
+                    cwd=deploy_dir,
+                    check=True,
+                )
+
+        elif args.target == "k8s":
+            content = k8s_backend.generate(
+                exp=exp_single,
+                infra=infra,
+                image=args.image,
+                partitions_dir=args.partitions_dir,
+                metrics_data_dir=args.metrics_dir,
+                experiment_config_path=experiment_config_path,
+                namespace=args.namespace,
+                dataset_dir=args.dataset_dir,
+            )
+            out_path = deploy_dir / "manifests.yaml"
+            out_path.write_text(content)
+            logger.info("Generated: %s", out_path)
+
+            if args.apply:
+                logger.info(
+                    "Running: kubectl apply -f manifests.yaml -n %s", args.namespace
+                )
+                subprocess.run(
+                    ["kubectl", "apply", "-f", "manifests.yaml", "-n", args.namespace],
+                    cwd=deploy_dir,
+                    check=True,
+                )
 
 
 if __name__ == "__main__":

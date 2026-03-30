@@ -1,0 +1,43 @@
+# Compute node image for multi-model partitions (resnet + llama on the same node).
+# Superset of Dockerfile.compute-resnet and Dockerfile.compute-llama: includes
+# torchvision, transformers, and accelerate so a single container can load
+# partitions from any supported model type.
+#
+# Build context: repo root
+#   docker build -f docker/Dockerfile.compute-multi -t dnn-compute-multi:latest .
+
+FROM pytorch/pytorch:2.4.0-cuda12.1-cudnn9-runtime
+
+WORKDIR /app
+
+# iproute2 provides `tc` for per-link traffic shaping via entrypoint.sh
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        iproute2 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY pyproject.toml .
+RUN pip install --no-cache-dir \
+    fastapi \
+    "uvicorn[standard]" \
+    httpx \
+    pyyaml \
+    pydantic \
+    torchvision \
+    transformers \
+    accelerate
+
+COPY framework/ ./framework/
+COPY models/__init__.py ./models/__init__.py
+COPY models/resnet/ ./models/resnet/
+COPY models/llama/ ./models/llama/
+COPY entrypoint.sh ./entrypoint.sh
+RUN chmod +x entrypoint.sh
+
+# HuggingFace model cache — mount a volume here to avoid re-downloading weights
+ENV HF_HOME=/hf_cache
+ENV PYTHONUNBUFFERED=1
+
+EXPOSE 8000
+
+ENTRYPOINT ["/app/entrypoint.sh"]
+CMD ["python", "-m", "framework.nodes.compute.multi.server"]

@@ -8,6 +8,7 @@ import yaml
 
 from framework.datamodels.experiment import ExperimentConfig
 from framework.datamodels.infra import InfraConfig, InfraLinkConfig
+from framework.datamodels.multi_experiment import MultiExperimentConfig
 
 
 def _compute_node_module(model: str) -> str:
@@ -422,6 +423,303 @@ def _orchestrator_job(
                                 "python",
                                 "-m",
                                 "framework.nodes.orchestrator.runner",
+                                f"/app/experiments/{exp.name}",
+                            ],
+                            "env": [
+                                {
+                                    "name": "CALLBACK_HOST",
+                                    "valueFrom": {
+                                        "fieldRef": {"fieldPath": "status.podIP"}
+                                    },
+                                },
+                                {"name": "CALLBACK_PORT", "value": "8080"},
+                                {"name": "PYTHONUNBUFFERED", "value": "1"},
+                            ],
+                            "volumeMounts": volume_mounts,
+                        }
+                    ],
+                    "volumes": volumes,
+                }
+            },
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
+# Multi-model manifest builders
+# ---------------------------------------------------------------------------
+
+
+def generate_multi(
+    exp: MultiExperimentConfig,
+    infra: InfraConfig,
+    image: str,
+    partitions_base_dir: Path,
+    metrics_data_dir: Path,
+    experiment_config_path: Path,
+    namespace: str = "default",
+    dataset_base_dir: Path | None = None,
+) -> str:
+    """Generate Kubernetes manifests for a multi-model experiment.
+
+    Produces a single YAML document stream containing:
+      - One Pod + Service per physical node (running dnn-compute-multi)
+      - A metrics server Pod + Service
+      - An orchestrator Job (if dataset_base_dir is provided)
+
+    Args:
+        exp: Multi-model experiment configuration.
+        infra: Infrastructure configuration (resources and link shaping).
+        image: Base image tag; used to derive dnn-compute-multi and dnn-metrics tags.
+        partitions_base_dir: Host path to the partitions base directory.
+            Must contain ``{model_name}/`` subdirectories with ``.pt`` files.
+        metrics_data_dir: Host path for metrics NDJSON storage.
+        experiment_config_path: Host path to the generated experiment.yaml.
+        namespace: Kubernetes namespace to deploy into.
+        dataset_base_dir: Host path to the base datasets directory, mounted at
+            ``/app/.datasets`` in the orchestrator pod.
+
+    Returns:
+        Multi-document YAML string suitable for ``kubectl apply -f``.
+    """
+    docs: list[dict[str, Any]] = []
+    tag = image.split(":")[-1] if ":" in image else "latest"
+    multi_image = f"dnn-compute-multi:{tag}"
+    metrics_image = f"dnn-metrics:{tag}"
+    orchestrator_image = f"dnn-orchestrator:{tag}"
+    experiments_dir = experiment_config_path.parent.parent
+
+    docs.append(_metrics_pod(exp, infra, metrics_image, metrics_data_dir, namespace))
+    docs.append(_metrics_service(exp, infra, namespace))
+
+    outgoing_links: dict[str, list[InfraLinkConfig]] = defaultdict(list)
+    for link in infra.links:
+        if any([link.bandwidth_mbps, link.delay_ms, link.loss_pct]):
+            outgoing_links[link.from_node].append(link)
+
+    node_host_map = {n.name: n.host for n in exp.nodes}
+
+    for node in exp.nodes:
+        infra_node = next((n for n in infra.nodes if n.name == node.name), None)
+        docs.append(
+            _multi_node_pod(
+                node_cfg=node,
+                infra_node=infra_node,
+                exp=exp,
+                image=multi_image,
+                partitions_base_dir=partitions_base_dir,
+                experiments_dir=experiments_dir,
+                namespace=namespace,
+                outgoing_links=outgoing_links.get(node.name, []),
+                node_host_map=node_host_map,
+            )
+        )
+        docs.append(_node_service(node, infra_node, namespace))
+
+    if dataset_base_dir is not None:
+        docs.append(
+            _multi_orchestrator_job(
+                exp=exp,
+                image=orchestrator_image,
+                experiment_config_path=experiment_config_path,
+                dataset_base_dir=dataset_base_dir,
+                namespace=namespace,
+            )
+        )
+
+    return "---\n".join(
+        yaml.dump(doc, default_flow_style=False, sort_keys=False) for doc in docs
+    )
+
+
+def _multi_node_pod(
+    node_cfg: Any,
+    infra_node: Any,
+    exp: MultiExperimentConfig,
+    image: str,
+    partitions_base_dir: Path,
+    experiments_dir: Path,
+    namespace: str,
+    outgoing_links: list[InfraLinkConfig],
+    node_host_map: dict[str, str],
+) -> dict[str, Any]:
+    pod_name = f"node-{node_cfg.name.lower()}"
+
+    env = [
+        {"name": "NODE_NAME", "value": node_cfg.name},
+        {
+            "name": "EXPERIMENT_CONFIG_PATH",
+            "value": f"/app/experiments/{exp.name}/experiment.yaml",
+        },
+        {"name": "PARTITIONS_BASE_DIR", "value": "/app/.partitions"},
+        {
+            "name": "METRICS_SERVER_URL",
+            "value": f"http://{exp.metrics_server.host}:{exp.metrics_server.port}",
+        },
+        {"name": "PORT", "value": str(node_cfg.port)},
+        {"name": "PYTHONUNBUFFERED", "value": "1"},
+    ]
+
+    for i, link in enumerate(outgoing_links):
+        prefix = f"TC_LINK_{i}"
+        env.append({"name": f"{prefix}_HOST", "value": node_host_map[link.to_node]})
+        if link.bandwidth_mbps is not None:
+            env.append(
+                {"name": f"{prefix}_MBPS", "value": str(int(link.bandwidth_mbps))}
+            )
+        if link.delay_ms is not None:
+            env.append({"name": f"{prefix}_DELAY_MS", "value": str(link.delay_ms)})
+        if link.jitter_ms is not None:
+            env.append({"name": f"{prefix}_JITTER_MS", "value": str(link.jitter_ms)})
+        if link.loss_pct is not None:
+            env.append({"name": f"{prefix}_LOSS_PCT", "value": str(link.loss_pct)})
+
+    resources: dict[str, Any] = {}
+    if infra_node:
+        r = infra_node.resources
+        req: dict[str, str] = {}
+        lim: dict[str, str] = {}
+        if r.cpu is not None:
+            req["cpu"] = str(r.cpu)
+            lim["cpu"] = str(r.cpu)
+        if r.memory is not None:
+            req["memory"] = r.memory
+            lim["memory"] = r.memory
+        if r.gpu > 0:
+            lim["nvidia.com/gpu"] = str(r.gpu)
+            req["nvidia.com/gpu"] = str(r.gpu)
+        if req or lim:
+            resources = {"requests": req, "limits": lim}
+
+    container: dict[str, Any] = {
+        "name": pod_name,
+        "image": image,
+        "args": ["python", "-m", "framework.nodes.compute.multi.server"],
+        "imagePullPolicy": "Never",
+        "ports": [{"containerPort": node_cfg.port}],
+        "env": env,
+        "resources": resources,
+        "volumeMounts": [
+            {
+                "name": "partitions",
+                "mountPath": "/app/.partitions",
+                "readOnly": True,
+            },
+            {
+                "name": "experiments",
+                "mountPath": "/app/experiments",
+                "readOnly": True,
+            },
+        ],
+    }
+
+    if outgoing_links:
+        container["securityContext"] = {"capabilities": {"add": ["NET_ADMIN"]}}
+
+    return {
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "metadata": {
+            "name": pod_name,
+            "namespace": namespace,
+            "labels": {"app": pod_name, "experiment": exp.name},
+        },
+        "spec": {
+            "hostname": node_cfg.host,
+            "affinity": {
+                "podAntiAffinity": {
+                    "requiredDuringSchedulingIgnoredDuringExecution": [
+                        {
+                            "labelSelector": {"matchLabels": {"experiment": exp.name}},
+                            "topologyKey": "kubernetes.io/hostname",
+                        }
+                    ]
+                }
+            },
+            "containers": [container],
+            "volumes": [
+                {
+                    "name": "partitions",
+                    "hostPath": {"path": str(partitions_base_dir.resolve())},
+                },
+                {
+                    "name": "experiments",
+                    "hostPath": {"path": str(experiments_dir.resolve())},
+                },
+            ],
+        },
+    }
+
+
+def _multi_orchestrator_job(
+    exp: MultiExperimentConfig,
+    image: str,
+    experiment_config_path: Path,
+    dataset_base_dir: Path,
+    namespace: str,
+) -> dict[str, Any]:
+    job_name = f"{exp.name.lower().replace('_', '-')}-orchestrator"
+
+    volume_mounts: list[dict[str, Any]] = [
+        {
+            "name": "experiment-dir",
+            "mountPath": "/app/experiments",
+            "readOnly": True,
+        },
+        {
+            "name": "datasets",
+            "mountPath": "/app/.datasets",
+        },
+    ]
+    volumes: list[dict[str, Any]] = [
+        {
+            "name": "experiment-dir",
+            "hostPath": {"path": str(experiment_config_path.parent.parent.resolve())},
+        },
+        {
+            "name": "datasets",
+            "hostPath": {"path": str(dataset_base_dir.resolve())},
+        },
+    ]
+
+    # Mount tokenizer for any pipeline that uses a Llama model with a tokenizer_path.
+    for dataset_cfg in exp.datasets.values():
+        if dataset_cfg.tokenizer_path is not None:
+            host_tokenizer = Path(dataset_cfg.tokenizer_path).resolve()
+            container_tokenizer = _abs_container_path(dataset_cfg.tokenizer_path)
+            volume_mounts.append(
+                {
+                    "name": "tokenizer",
+                    "mountPath": container_tokenizer,
+                    "readOnly": True,
+                }
+            )
+            volumes.append(
+                {
+                    "name": "tokenizer",
+                    "hostPath": {"path": str(host_tokenizer)},
+                }
+            )
+            break  # Only one tokenizer mount needed (shared across Llama pipelines).
+
+    return {
+        "apiVersion": "batch/v1",
+        "kind": "Job",
+        "metadata": {"name": job_name, "namespace": namespace},
+        "spec": {
+            "backoffLimit": 0,
+            "template": {
+                "spec": {
+                    "restartPolicy": "Never",
+                    "containers": [
+                        {
+                            "name": "orchestrator",
+                            "image": image,
+                            "imagePullPolicy": "Never",
+                            "args": [
+                                "python",
+                                "-m",
+                                "framework.nodes.orchestrator.multi_runner",
                                 f"/app/experiments/{exp.name}",
                             ],
                             "env": [

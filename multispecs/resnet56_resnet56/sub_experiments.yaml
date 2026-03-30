@@ -1,0 +1,235 @@
+sub_experiments:
+
+  # No compression on any link for either pipeline.
+  # Establishes the true multi-model baseline with both pipelines sharing nodes
+  # and competing for compute (FIFO queue) but without any communication overhead.
+  baseline:
+    links:
+      - from: A
+        to: B
+        compression:
+          resnet-a:
+            compression: none
+          llama-mmlu-a:
+            compression: none
+      - from: B
+        to: C
+        compression:
+          resnet-a:
+            compression: none
+          llama-mmlu-a:
+            compression: none
+
+  # Both pipelines compressed with topk at the same rate on all links.
+  # Paired sweep: all four (pipeline, link) dimensions advance together, so each
+  # run uses one rate value across the board.  6 runs total.
+  # Use this to understand the symmetric case: equal compression pressure on
+  # both models simultaneously.
+  topk_both_paired:
+    sweep_mode: paired
+    sweep:
+      - links:
+          - from: A
+            to: B
+            compression:
+              resnet-a:
+                compression: topk
+                rates: [0.0625, 0.125, 0.25, 0.5, 0.75, 1.0]
+              llama-mmlu-a:
+                compression: topk
+                rates: [0.0625, 0.125, 0.25, 0.5, 0.75, 1.0]
+          - from: B
+            to: C
+            compression:
+              resnet-a:
+                compression: topk
+                rates: [0.0625, 0.125, 0.25, 0.5, 0.75, 1.0]
+              llama-mmlu-a:
+                compression: topk
+                rates: [0.0625, 0.125, 0.25, 0.5, 0.75, 1.0]
+
+  # Sweep topk compression for resnet only; llama is always uncompressed.
+  # Product sweep: resnet A→B and B→C rates vary independently.  36 runs total.
+  # Llama runs at none in every run so it acts as background load.
+  # Compare resnet accuracy vs. topk_both_paired to isolate the effect of
+  # llama compression (or lack thereof) on resnet.
+  topk_resnet_only:
+    sweep_mode: product
+    sweep:
+      - links:
+          - from: A
+            to: B
+            compression:
+              resnet-a:
+                compression: topk
+                rates: [0.0625, 0.125, 0.25, 0.5, 0.75, 1.0]
+              llama-mmlu-a:
+                compression: none
+          - from: B
+            to: C
+            compression:
+              resnet-a:
+                compression: topk
+                rates: [0.0625, 0.125, 0.25, 0.5, 0.75, 1.0]
+              llama-mmlu-a:
+                compression: none
+
+  # Sweep topk compression for llama only; resnet is always uncompressed.
+  # Product sweep: llama A→B and B→C rates vary independently.  36 runs total.
+  # Resnet runs at none in every run so it acts as background load.
+  # Compare llama accuracy vs. topk_both_paired to isolate the effect of
+  # resnet compression on llama.
+  topk_llama_only:
+    sweep_mode: product
+    sweep:
+      - links:
+          - from: A
+            to: B
+            compression:
+              resnet-a:
+                compression: none
+              llama-mmlu-a:
+                compression: topk
+                rates: [0.0625, 0.125, 0.25, 0.5, 0.75, 1.0]
+          - from: B
+            to: C
+            compression:
+              resnet-a:
+                compression: none
+              llama-mmlu-a:
+                compression: topk
+                rates: [0.0625, 0.125, 0.25, 0.5, 0.75, 1.0]
+
+  # Both pipelines compressed with quantization at the same rate on all links.
+  # Paired sweep: 4 runs total (0.5, 0.25, 0.125, 0.0625 bits per element).
+  quantization_both_paired:
+    sweep_mode: paired
+    sweep:
+      - links:
+          - from: A
+            to: B
+            compression:
+              resnet-a:
+                compression: quantization
+                rates: [0.5, 0.25, 0.125, 0.0625]
+              llama-mmlu-a:
+                compression: quantization
+                rates: [0.5, 0.25, 0.125, 0.0625]
+          - from: B
+            to: C
+            compression:
+              resnet-a:
+                compression: quantization
+                rates: [0.5, 0.25, 0.125, 0.0625]
+              llama-mmlu-a:
+                compression: quantization
+                rates: [0.5, 0.25, 0.125, 0.0625]
+
+  # Sweep quantization for resnet only; llama is always uncompressed.
+  # Product sweep: 4x4 = 16 runs.
+  quantization_resnet_only:
+    sweep_mode: product
+    sweep:
+      - links:
+          - from: A
+            to: B
+            compression:
+              resnet-a:
+                compression: quantization
+                rates: [0.5, 0.25, 0.125, 0.0625]
+              llama-mmlu-a:
+                compression: none
+          - from: B
+            to: C
+            compression:
+              resnet-a:
+                compression: quantization
+                rates: [0.5, 0.25, 0.125, 0.0625]
+              llama-mmlu-a:
+                compression: none
+
+  # Sweep quantization for llama only; resnet is always uncompressed.
+  # Product sweep: 4x4 = 16 runs.
+  quantization_llama_only:
+    sweep_mode: product
+    sweep:
+      - links:
+          - from: A
+            to: B
+            compression:
+              resnet-a:
+                compression: none
+              llama-mmlu-a:
+                compression: quantization
+                rates: [0.5, 0.25, 0.125, 0.0625]
+          - from: B
+            to: C
+            compression:
+              resnet-a:
+                compression: none
+              llama-mmlu-a:
+                compression: quantization
+                rates: [0.5, 0.25, 0.125, 0.0625]
+
+  # Both pipelines compressed with llmint8 (fp16 outliers, int8 regular) at the
+  # same rate.  Paired sweep: 4 runs.
+  llmint8_both_paired:
+    sweep_mode: paired
+    sweep:
+      - links:
+          - from: A
+            to: B
+            compression:
+              resnet-a:
+                compression: llmint8
+                rates: [0.01, 0.05, 0.1, 0.25]
+                outlier_precision: fp16
+                regular_precision: int8
+              llama-mmlu-a:
+                compression: llmint8
+                rates: [0.01, 0.05, 0.1, 0.25]
+                outlier_precision: fp16
+                regular_precision: int8
+          - from: B
+            to: C
+            compression:
+              resnet-a:
+                compression: llmint8
+                rates: [0.01, 0.05, 0.1, 0.25]
+                outlier_precision: fp16
+                regular_precision: int8
+              llama-mmlu-a:
+                compression: llmint8
+                rates: [0.01, 0.05, 0.1, 0.25]
+                outlier_precision: fp16
+                regular_precision: int8
+
+  # Cross-method: resnet uses topk, llama uses llmint8, swept together (paired).
+  # Both pipelines advance through their respective rate lists in lock-step.
+  # 4 runs (min of 6 topk rates and 4 llmint8 rates, capped at llmint8 length).
+  topk_resnet_llmint8_llama_paired:
+    sweep_mode: paired
+    sweep:
+      - links:
+          - from: A
+            to: B
+            compression:
+              resnet-a:
+                compression: topk
+                rates: [0.0625, 0.125, 0.25, 0.5]
+              llama-mmlu-a:
+                compression: llmint8
+                rates: [0.01, 0.05, 0.1, 0.25]
+                outlier_precision: fp16
+                regular_precision: int8
+          - from: B
+            to: C
+            compression:
+              resnet-a:
+                compression: topk
+                rates: [0.0625, 0.125, 0.25, 0.5]
+              llama-mmlu-a:
+                compression: llmint8
+                rates: [0.01, 0.05, 0.1, 0.25]
+                outlier_precision: fp16
+                regular_precision: int8

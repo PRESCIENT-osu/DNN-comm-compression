@@ -8,6 +8,7 @@ import yaml
 
 from framework.datamodels.experiment import ExperimentConfig
 from framework.datamodels.infra import InfraConfig
+from framework.datamodels.multi_experiment import MultiExperimentConfig
 from framework.datamodels.spec import GeneratedExperimentConfig
 
 logger = logging.getLogger(__name__)
@@ -60,6 +61,37 @@ def load_experiment_config(path: Path) -> ExperimentConfig:
         data = yaml.safe_load(f)
     raw = data.get("experiment", data)
     return ExperimentConfig.model_validate(raw)
+
+
+def is_multi_experiment(path: Path) -> bool:
+    """Return True if the experiment YAML is a multi-model generated experiment.
+
+    Multi-model experiments (produced by tools/generate.py --multi) have a
+    ``pipelines`` key at the top level.
+
+    Args:
+        path: Path to the experiment YAML file.
+
+    Returns:
+        True if the file uses the multi-model format.
+    """
+    with open(path) as f:
+        data = yaml.safe_load(f) or {}
+    return "pipelines" in data
+
+
+def load_multi_experiment_config(path: Path) -> MultiExperimentConfig:
+    """Load a multi-model generated experiment config.
+
+    Args:
+        path: Path to the experiment YAML file.
+
+    Returns:
+        Validated MultiExperimentConfig instance.
+    """
+    with open(path) as f:
+        data = yaml.safe_load(f)
+    return MultiExperimentConfig.model_validate(data)
 
 
 def load_infra_config(path: Path) -> InfraConfig:

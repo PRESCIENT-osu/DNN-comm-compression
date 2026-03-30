@@ -1,0 +1,41 @@
+nodes:
+  - A
+  - B
+  - C
+
+pipelines:
+  - name: resnet-a
+    model: resnet
+    partitions:
+      A: [p1]
+      B: [p2, p3]
+      C: [p4, p5]
+    flow: [A, B, C]
+
+  - name: resnet-b
+    model: resnet
+    partitions:
+      A: [p3, p4]
+      B: [p1, p2]
+      C: [p5]
+    flow: [B, A, C]
+
+datasets:
+  resnet:
+    name: cifar10
+    path: .datasets/cifar10
+    batch_size: 100
+    max_in_flight: 10
+    max_samples: 1000
+    seed: 42
+
+workload:
+  pattern: fill
+  window_per_pipeline: 4
+  mix:
+    resnet-a: 0.5
+    resnet-b: 0.5
+
+metrics_server:
+  host: metrics
+  port: 9100

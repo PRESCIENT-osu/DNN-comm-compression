@@ -1,0 +1,56 @@
+nodes:
+  - A
+  - B
+  - C
+
+pipelines:
+  - name: resnet-a
+    model: resnet
+    partitions:
+      A: [p1]
+      B: [p2, p3]
+      C: [p4, p5]
+    flow: [A, B, C]
+
+  - name: llama-mmlu-a
+    model: llama
+    partitions:
+      A: [p1]
+      B: [p2]
+      C: [p3]
+    flow: [A, B, C]
+
+datasets:
+  resnet:
+    name: cifar10
+    path: .datasets/cifar10
+    batch_size: 100
+    max_in_flight: 10
+    max_samples: 1000
+    seed: 42
+  llama:
+    name: mmlu
+    path: .datasets/mmlu
+    tokenizer_path: models/llama/.partitions/tokenizer
+    batch_size: 4
+    max_in_flight: 4
+    subjects:
+      - college_computer_science
+      - high_school_mathematics
+      - professional_law
+      - global_facts
+      - miscellaneous
+      - business_ethics
+    samples_per_subject: 20
+    seed: 42
+
+workload:
+  pattern: fill
+  window_per_pipeline: 4
+  mix:
+    resnet-a: 0.5
+    llama-mmlu-a: 0.5
+
+metrics_server:
+  host: metrics
+  port: 9100
