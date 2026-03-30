@@ -5,6 +5,7 @@ __pycache__
 *.pyc
 *.pyo
 archive/
+**/.partitions/
 experiments/
 docs/
 *.md
