@@ -18,6 +18,54 @@ def _node_url(host: str, port: int, path: str) -> str:
     return f"http://{host}:{port}{path}"
 
 
+async def wait_for_nodes_ready(
+    exp: ExperimentConfig,
+    timeout_s: float = 300.0,
+    node_host: str | None = None,
+) -> None:
+    """Poll all nodes until every node responds to GET /health.
+
+    Called once at experiment startup to ensure all pods are up before
+    the first config push or inference batch is sent.
+
+    Args:
+        exp: Experiment config carrying node host/port information.
+        timeout_s: Maximum time to wait before raising an error.
+        node_host: Override hostname used to reach all nodes.
+
+    Raises:
+        RuntimeError: If any node is not reachable within timeout.
+    """
+    node_urls = {
+        n.name: _node_url(node_host or n.host, n.port, "/health") for n in exp.nodes
+    }
+    pending: set[str] = set(node_urls)
+    deadline = asyncio.get_event_loop().time() + timeout_s
+    logger.info("Waiting for %d node(s) to become ready...", len(pending))
+
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        while pending:
+            if asyncio.get_event_loop().time() > deadline:
+                raise RuntimeError(
+                    f"Timed out waiting for nodes to become ready after {timeout_s}s. "
+                    f"Still not reachable: {pending}"
+                )
+            await asyncio.sleep(_POLL_INTERVAL_S)
+            still_pending: set[str] = set()
+            for name in list(pending):
+                try:
+                    resp = await client.get(node_urls[name])
+                    if resp.status_code == 200:
+                        logger.info("Node '%s' is ready", name)
+                    else:
+                        still_pending.add(name)
+                except Exception:
+                    still_pending.add(name)
+            pending = still_pending
+
+    logger.info("All nodes ready")
+
+
 async def wait_for_all_idle(
     exp: ExperimentConfig,
     timeout_s: float = _DRAIN_TIMEOUT_S,

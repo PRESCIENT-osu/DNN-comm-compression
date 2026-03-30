@@ -11,7 +11,10 @@ from typing import Any
 from framework.datamodels.experiment import ExperimentConfig
 from framework.datamodels.spec import GeneratedExperimentConfig, ResolvedSubExperiment
 from framework.nodes.metrics.emitter import MetricsEmitter
-from framework.nodes.orchestrator.controller import push_run_config
+from framework.nodes.orchestrator.controller import (
+    push_run_config,
+    wait_for_nodes_ready,
+)
 from framework.nodes.orchestrator.data_client import DataClient
 from framework.utils.loader import (
     is_generated_experiment,
@@ -199,6 +202,8 @@ async def _run_sweep(
     if dry_run:
         logger.info("%sDry run — skipping execution", label)
         return
+
+    await wait_for_nodes_ready(exp, node_host=node_host)
 
     order = exp.node_order()
     first_node = next(n for n in exp.nodes if n.name == order[0])
