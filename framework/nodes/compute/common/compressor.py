@@ -105,10 +105,11 @@ class TopK(Compressor):
         packed_mask = np.packbits(mask_np, axis=1)
 
         payload = {
-            "values": sorted_values.cpu().numpy(),
+            "values": sorted_values.cpu().float().numpy(),
             "packed_mask": packed_mask,
             "shape": original_shape,
             "elements_per_sample": elements_per_sample,
+            "dtype": tensor.dtype,
         }
         return pickle.dumps(payload)
 
@@ -126,7 +127,7 @@ class TopK(Compressor):
             batch_size, elements_per_sample, device=device, dtype=values.dtype
         )
         reshaped[mask] = values.flatten()
-        return reshaped.reshape(shape)
+        return reshaped.reshape(shape).to(payload.get("dtype", torch.float32))
 
 
 # ---------------------------------------------------------------------------
@@ -155,7 +156,7 @@ class RandomK(Compressor):
             "dtype": tensor.dtype,
             "numel": flat.numel(),
             "indices": indices.cpu().numpy(),
-            "values": values.cpu().numpy(),
+            "values": values.cpu().float().numpy(),
         }
         return pickle.dumps(payload)
 
