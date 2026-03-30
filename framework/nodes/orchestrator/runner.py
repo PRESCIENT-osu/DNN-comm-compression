@@ -76,19 +76,27 @@ async def run_experiment(
         emitter = MetricsEmitter(server_url=metrics_url)
         await emitter.start()
 
-        for sub_exp in generated.sub_experiments:
-            exp = _sub_experiment_to_exp_config(generated, sub_exp)
-            _warn_missing_baselines(sub_exp.baselines)
-            await _run_sweep(
-                exp=exp,
-                sub_experiment_name=sub_exp.name,
-                callback_host=callback_host,
-                callback_port=callback_port,
-                result_timeout_s=result_timeout_s,
-                dry_run=dry_run,
-                node_host=node_host,
-                emitter=emitter,
-            )
+        # Build the data client once — dataset loading (tokenization, HF download)
+        # happens here and is reused across all sub-experiments and runs.
+        first_exp = _sub_experiment_to_exp_config(
+            generated, generated.sub_experiments[0]
+        )
+        shared_client = _make_data_client(
+            first_exp, callback_host, callback_port, result_timeout_s
+        )
+
+        async with shared_client.session():
+            for sub_exp in generated.sub_experiments:
+                exp = _sub_experiment_to_exp_config(generated, sub_exp)
+                _warn_missing_baselines(sub_exp.baselines)
+                await _run_sweep(
+                    exp=exp,
+                    sub_experiment_name=sub_exp.name,
+                    client=shared_client,
+                    dry_run=dry_run,
+                    node_host=node_host,
+                    emitter=emitter,
+                )
 
         await emitter.stop()
         logger.info("Experiment '%s' complete", generated.name)
@@ -102,16 +110,16 @@ async def run_experiment(
         emitter = MetricsEmitter(server_url=metrics_url)
         await emitter.start()
 
-        await _run_sweep(
-            exp=exp,
-            sub_experiment_name=None,
-            callback_host=callback_host,
-            callback_port=callback_port,
-            result_timeout_s=result_timeout_s,
-            dry_run=dry_run,
-            node_host=node_host,
-            emitter=emitter,
-        )
+        client = _make_data_client(exp, callback_host, callback_port, result_timeout_s)
+        async with client.session():
+            await _run_sweep(
+                exp=exp,
+                sub_experiment_name=None,
+                client=client,
+                dry_run=dry_run,
+                node_host=node_host,
+                emitter=emitter,
+            )
 
         await emitter.stop()
         logger.info("Experiment '%s' complete", exp.name)
@@ -168,9 +176,7 @@ def _warn_missing_baselines(baselines: list[str]) -> None:
 async def _run_sweep(
     exp: ExperimentConfig,
     sub_experiment_name: str | None,
-    callback_host: str,
-    callback_port: int,
-    result_timeout_s: float,
+    client: DataClient,
     dry_run: bool,
     node_host: str | None,
     emitter: MetricsEmitter,
@@ -180,9 +186,7 @@ async def _run_sweep(
     Args:
         exp: Fully resolved experiment config for this sweep.
         sub_experiment_name: Sub-experiment label for logging, or None for legacy.
-        callback_host: Hostname pipeline nodes use to reach the result callback.
-        callback_port: Port for the orchestrator's callback server.
-        result_timeout_s: Per-batch result wait timeout in seconds.
+        client: Data client (already in an active session).
         dry_run: If True, log the sweep plan without executing.
         node_host: Optional node hostname override.
         emitter: Shared metrics emitter (already started).
@@ -210,28 +214,25 @@ async def _run_sweep(
     resolved_host = node_host or first_node.host
     first_node_url = f"http://{resolved_host}:{first_node.port}/infer"
 
-    client = _make_data_client(exp, callback_host, callback_port, result_timeout_s)
+    for run in runs:
+        logger.info("%sStarting run: %s", label, run.run_id)
 
-    async with client.session():
-        for run in runs:
-            logger.info("%sStarting run: %s", label, run.run_id)
+        if run.links:
+            await push_run_config(exp, run, node_host=node_host)
+        else:
+            logger.info("%sNo links to configure for run '%s'", label, run.run_id)
 
-            if run.links:
-                await push_run_config(exp, run, node_host=node_host)
-            else:
-                logger.info("%sNo links to configure for run '%s'", label, run.run_id)
+        records = await client.run(
+            exp=exp,
+            run_id=run.run_id,
+            first_node_url=first_node_url,
+            emitter=emitter,
+        )
 
-            records = await client.run(
-                exp=exp,
-                run_id=run.run_id,
-                first_node_url=first_node_url,
-                emitter=emitter,
-            )
-
-            if records:
-                _log_run_summary(run.run_id, records)
-            else:
-                logger.warning("%sRun '%s' produced no results", label, run.run_id)
+        if records:
+            _log_run_summary(run.run_id, records)
+        else:
+            logger.warning("%sRun '%s' produced no results", label, run.run_id)
 
 
 def _make_data_client(
@@ -256,6 +257,7 @@ def _make_data_client(
 
         tokenizer_path = exp.dataset.tokenizer_path or exp.dataset.path
         return LlamaDataClient(  # type: ignore[return-value]
+            dataset_config=exp.dataset,
             tokenizer_path=tokenizer_path,
             callback_host=callback_host,
             callback_port=callback_port,

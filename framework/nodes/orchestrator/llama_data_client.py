@@ -196,6 +196,7 @@ class LlamaDataClient:
 
     def __init__(
         self,
+        dataset_config: DatasetConfig,
         tokenizer_path: str,
         callback_host: str = "localhost",
         callback_port: int = 8080,
@@ -210,6 +211,20 @@ class LlamaDataClient:
             self._tokenizer.encode(" " + c, add_special_tokens=False)[-1]
             for c in ["A", "B", "C", "D"]
         ]
+        # Build the dataset loader once — reused across all sweep runs.
+        dataset_name = dataset_config.name.lower()
+        if dataset_name == "wikitext2":
+            self._loader: _WikiText2Batches | _MMLUBatches = _WikiText2Batches(
+                dataset_config, self._tokenizer
+            )
+            self._metric_type = "perplexity"
+        elif dataset_name == "mmlu":
+            self._loader = _MMLUBatches(dataset_config, self._tokenizer)
+            self._metric_type = "accuracy"
+        else:
+            raise ValueError(
+                f"Unsupported Llama dataset '{dataset_config.name}'. Use 'wikitext2' or 'mmlu'."
+            )
         self._callback_host = callback_host
         self._callback_port = callback_port
         self._result_timeout_s = result_timeout_s
@@ -251,18 +266,8 @@ class LlamaDataClient:
         Returns:
             List of LlamaRunRecord for all completed batches.
         """
-        dataset_name = exp.dataset.name.lower()
-        if dataset_name == "wikitext2":
-            loader = _WikiText2Batches(exp.dataset, self._tokenizer)
-            metric_type = "perplexity"
-        elif dataset_name == "mmlu":
-            loader = _MMLUBatches(exp.dataset, self._tokenizer)
-            metric_type = "accuracy"
-        else:
-            raise ValueError(
-                f"Unsupported Llama dataset '{exp.dataset.name}'. Use 'wikitext2' or 'mmlu'."
-            )
-
+        loader = self._loader
+        metric_type = self._metric_type
         semaphore = asyncio.Semaphore(exp.dataset.max_in_flight)
         records: list[LlamaRunRecord] = []
         lock = asyncio.Lock()
