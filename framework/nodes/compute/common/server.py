@@ -471,10 +471,16 @@ async def _initialize(
 
     next_node_url: str | None = None
     next_node_name: str | None = None
-    if not is_last_node and outgoing_link:
-        next_node_cfg = next(
-            (n for n in exp.nodes if n.name == outgoing_link.to_node), None
-        )
+    if not is_last_node:
+        if outgoing_link:
+            next_name = outgoing_link.to_node
+        else:
+            # Generated experiment format has no top-level links; fall back to
+            # definition order.  NOTE: this assumes a strictly linear pipeline
+            # (nodes listed in execution order).  Revisit if we ever support
+            # topologies where partitions execute out of order (e.g. diamond).
+            next_name = order[order.index(node_name) + 1]
+        next_node_cfg = next((n for n in exp.nodes if n.name == next_name), None)
         if next_node_cfg:
             next_node_url = f"http://{next_node_cfg.host}:{next_node_cfg.port}/infer"
             next_node_name = next_node_cfg.name
