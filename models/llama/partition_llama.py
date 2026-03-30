@@ -1,3 +1,5 @@
+# ruff: noqa
+
 """Partition a Llama-3.1-8B model into 3 sequential nn.Module stages.
 
 Partition layout:
@@ -174,6 +176,23 @@ class LlamaPartition3(nn.Module):
             )
         hidden_states = self.norm(hidden_states)
         return self.lm_head(hidden_states)
+
+
+# Ensure pickle records the stable module path regardless of how this script
+# is invoked (python script.py sets __name__='__main__', which would make
+# torch.load fail at unpickle time when __main__ is a different module).
+#
+# We also register __main__ in sys.modules under the importable name so that
+# pickle's verification step (import module, lookup class) finds the same class
+# objects rather than re-importing the file and getting different objects.
+import sys as _sys
+
+if __name__ == "__main__":
+    _sys.modules.setdefault("models.llama.partition_llama", _sys.modules["__main__"])  # noqa: E402
+
+LlamaPartition1.__module__ = "models.llama.partition_llama"
+LlamaPartition2.__module__ = "models.llama.partition_llama"
+LlamaPartition3.__module__ = "models.llama.partition_llama"
 
 
 # ---------------------------------------------------------------------------
