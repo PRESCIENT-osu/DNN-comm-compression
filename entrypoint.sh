@@ -36,16 +36,16 @@ if [ "$has_tc" = true ]; then
 
         # Resolve hostname to IP with retries
         IP=""
-        for attempt in 1 2 3 4 5; do
+        for attempt in $(seq 1 30); do
             IP=$(getent hosts "$HOST" | awk '{print $1; exit}')
             [ -n "$IP" ] && break
-            echo "[entrypoint] Waiting for DNS resolution of $HOST (attempt $attempt/5)..."
-            sleep 2
+            echo "[entrypoint] Waiting for DNS resolution of $HOST (attempt $attempt/30)..."
+            sleep 3
         done
 
         if [ -z "$IP" ]; then
-            echo "[entrypoint] WARNING: could not resolve $HOST after 5 attempts, skipping tc rule"
-            continue
+            echo "[entrypoint] ERROR: could not resolve $HOST after 30 attempts (90s), aborting"
+            exit 1
         fi
 
         CLASSID="1:$((i + 1))"
