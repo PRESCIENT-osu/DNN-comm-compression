@@ -88,6 +88,15 @@ class NodeState:
         self.last_run_id: str = "none"
 
     @property
+    def model_dtype(self) -> torch.dtype | None:
+        """dtype of the loaded partitions, or None if partitions have no parameters."""
+        for partition in self.partitions:
+            param = next(iter(partition.parameters()), None)
+            if param is not None:
+                return param.dtype
+        return None
+
+    @property
     def in_flight(self) -> int:
         """Current number of requests being processed."""
         return self._in_flight
@@ -265,6 +274,8 @@ async def _process_inference(state: NodeState, request: InferRequest) -> None:
                 regular_precision=state.incoming_regular_precision,
             )
             tensor = compressor.decompress(raw_bytes, state.device)
+            if state.model_dtype is not None and tensor.dtype != state.model_dtype:
+                tensor = tensor.to(state.model_dtype)
             state.emitter.emit(
                 DecompressEvent(
                     experiment_id=request.experiment_id,
