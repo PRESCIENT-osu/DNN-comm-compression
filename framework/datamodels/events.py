@@ -22,6 +22,7 @@ class EventType(str, Enum):
     QUEUE_SNAPSHOT = "queue_snapshot"
     TASK_E2E = "task_e2e"
     RUN_THROUGHPUT = "run_throughput"
+    SUB_EXPERIMENT = "sub_experiment"
 
 
 class BaseEvent(BaseModel):
@@ -186,6 +187,19 @@ class RunThroughputEvent(BaseEvent):
     per_pipeline: dict[str, PipelineThroughputStats]
 
 
+class SubExperimentEvent(BaseEvent):
+    """Emitted by the orchestrator when a sub-experiment (sweep) completes.
+
+    Captures the wall-clock duration of a full sub-experiment sweep from the
+    first run dispatch to the last result received.
+    """
+
+    event_type: Literal[EventType.SUB_EXPERIMENT] = EventType.SUB_EXPERIMENT
+    sub_experiment_name: str | None
+    duration_s: float
+    n_runs: int
+
+
 MetricEvent = Annotated[
     ForwardPassEvent
     | CompressEvent
@@ -197,6 +211,7 @@ MetricEvent = Annotated[
     | TaskNodeTimingEvent
     | QueueSnapshotEvent
     | TaskE2EEvent
-    | RunThroughputEvent,
+    | RunThroughputEvent
+    | SubExperimentEvent,
     Field(discriminator="event_type"),
 ]

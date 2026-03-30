@@ -5,9 +5,11 @@ import asyncio
 import logging
 import math
 import os
+import time
 from pathlib import Path
 from typing import Any
 
+from framework.datamodels.events import SubExperimentEvent
 from framework.datamodels.experiment import ExperimentConfig
 from framework.datamodels.spec import GeneratedExperimentConfig, ResolvedSubExperiment
 from framework.nodes.metrics.emitter import MetricsEmitter
@@ -214,6 +216,8 @@ async def _run_sweep(
     resolved_host = node_host or first_node.host
     first_node_url = f"http://{resolved_host}:{first_node.port}/infer"
 
+    t_sweep_start = time.perf_counter()
+
     for run in runs:
         logger.info("%sStarting run: %s", label, run.run_id)
 
@@ -233,6 +237,18 @@ async def _run_sweep(
             _log_run_summary(run.run_id, records)
         else:
             logger.warning("%sRun '%s' produced no results", label, run.run_id)
+
+    duration_s = time.perf_counter() - t_sweep_start
+    logger.info("%sSub-experiment complete in %.1fs", label, duration_s)
+    emitter.emit(
+        SubExperimentEvent(
+            experiment_id=exp.name,
+            run_id=sub_experiment_name or "default",
+            sub_experiment_name=sub_experiment_name,
+            duration_s=duration_s,
+            n_runs=len(runs),
+        )
+    )
 
 
 def _make_data_client(
