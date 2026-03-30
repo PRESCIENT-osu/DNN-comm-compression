@@ -19,6 +19,7 @@ import time
 import uuid
 from collections.abc import AsyncGenerator, Iterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -199,7 +200,8 @@ class LlamaDataClient:
         callback_port: int = 8080,
         result_timeout_s: float = 300.0,
     ) -> None:
-        self._tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
+        resolved_tokenizer_path = str(Path(tokenizer_path).resolve())
+        self._tokenizer = AutoTokenizer.from_pretrained(resolved_tokenizer_path)
         if self._tokenizer.pad_token is None:
             self._tokenizer.pad_token = self._tokenizer.eos_token
         # Token IDs for A B C D (used by MMLU decoding)

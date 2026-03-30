@@ -363,6 +363,47 @@ def _orchestrator_job(
         Job manifest dict.
     """
     job_name = f"{exp.name.lower().replace('_', '-')}-orchestrator"
+
+    volume_mounts: list[dict[str, Any]] = [
+        {
+            "name": "experiment-dir",
+            "mountPath": "/app/experiments",
+            "readOnly": True,
+        },
+        {
+            "name": "dataset",
+            "mountPath": dataset_container_path,
+        },
+    ]
+    volumes: list[dict[str, Any]] = [
+        {
+            "name": "experiment-dir",
+            "hostPath": {"path": str(experiment_config_path.parent.parent.resolve())},
+        },
+        {
+            "name": "dataset",
+            "hostPath": {"path": str(dataset_dir.resolve())},
+        },
+    ]
+
+    tokenizer_path = exp.dataset.tokenizer_path
+    if tokenizer_path is not None:
+        host_tokenizer = Path(tokenizer_path).resolve()
+        container_tokenizer = _abs_container_path(tokenizer_path)
+        volume_mounts.append(
+            {
+                "name": "tokenizer",
+                "mountPath": container_tokenizer,
+                "readOnly": True,
+            }
+        )
+        volumes.append(
+            {
+                "name": "tokenizer",
+                "hostPath": {"path": str(host_tokenizer)},
+            }
+        )
+
     return {
         "apiVersion": "batch/v1",
         "kind": "Job",
@@ -393,33 +434,10 @@ def _orchestrator_job(
                                 {"name": "CALLBACK_PORT", "value": "8080"},
                                 {"name": "PYTHONUNBUFFERED", "value": "1"},
                             ],
-                            "volumeMounts": [
-                                {
-                                    "name": "experiment-dir",
-                                    "mountPath": "/app/experiments",
-                                    "readOnly": True,
-                                },
-                                {
-                                    "name": "dataset",
-                                    "mountPath": dataset_container_path,
-                                },
-                            ],
+                            "volumeMounts": volume_mounts,
                         }
                     ],
-                    "volumes": [
-                        {
-                            "name": "experiment-dir",
-                            "hostPath": {
-                                "path": str(
-                                    experiment_config_path.parent.parent.resolve()
-                                )
-                            },
-                        },
-                        {
-                            "name": "dataset",
-                            "hostPath": {"path": str(dataset_dir.resolve())},
-                        },
-                    ],
+                    "volumes": volumes,
                 }
             },
         },
