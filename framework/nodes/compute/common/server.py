@@ -264,6 +264,11 @@ async def _process_inference(state: NodeState, request: InferRequest) -> None:
     try:
         raw_bytes = base64.b64decode(request.data)
 
+        # Deserialize attention_mask if present (MMLU batches with batch_size > 1).
+        attention_mask: torch.Tensor | None = None
+        if request.attention_mask is not None:
+            attention_mask = pickle.loads(base64.b64decode(request.attention_mask))
+
         if state.is_first_node:
             tensor: torch.Tensor = pickle.loads(raw_bytes)
         else:
@@ -290,7 +295,12 @@ async def _process_inference(state: NodeState, request: InferRequest) -> None:
         t0 = time.perf_counter()
         with torch.no_grad():
             for partition in state.partitions:
-                tensor = partition(tensor.to(state.device))
+                if attention_mask is not None:
+                    tensor = partition(
+                        tensor.to(state.device), attention_mask=attention_mask
+                    )
+                else:
+                    tensor = partition(tensor.to(state.device))
         state.emitter.emit(
             ForwardPassEvent(
                 experiment_id=request.experiment_id,
@@ -360,6 +370,7 @@ async def _forward_to_next(
         "experiment_id": request.experiment_id,
         "run_id": request.run_id,
         "data": base64.b64encode(compressed).decode(),
+        "attention_mask": request.attention_mask,  # None for ResNet/WikiText; forwarded as-is
     }
     async with httpx.AsyncClient(timeout=30.0) as client:
         resp = await client.post(next_url, json=payload)

@@ -13,6 +13,9 @@ class InferRequest(BaseModel):
     experiment_id: str
     run_id: str
     data: str  # base64-encoded bytes (compressed activation or raw input)
+    attention_mask: str | None = (
+        None  # base64-encoded pickled bool tensor [B, L]; MMLU only
+    )
 
 
 class ConfigUpdate(BaseModel):

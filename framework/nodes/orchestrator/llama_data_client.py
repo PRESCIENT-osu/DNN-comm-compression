@@ -74,12 +74,14 @@ class _WikiText2Batches:
         self._chunks = chunks[idx]
         self._batch_size = config.batch_size
 
-    def batches(self) -> Iterator[tuple[int, torch.Tensor, list[int]]]:
-        """Yield (batch_idx, input_ids [B, L], []) — no labels needed (computed from logits)."""
+    def batches(
+        self,
+    ) -> Iterator[tuple[int, torch.Tensor, list[int], torch.Tensor | None]]:
+        """Yield (batch_idx, input_ids [B, L], [], None) — no labels or mask (fixed-length chunks)."""
         n = len(self._chunks)
         for i in range(0, n, self._batch_size):
             batch = self._chunks[i : i + self._batch_size]
-            yield i // self._batch_size, batch, []
+            yield i // self._batch_size, batch, [], None
 
     def num_batches(self) -> int:
         """Return the total number of batches."""
@@ -154,8 +156,13 @@ class _MMLUBatches:
         )
         return f"Question: {item['question']}\n{choices}\nAnswer:"
 
-    def batches(self) -> Iterator[tuple[int, torch.Tensor, list[int]]]:
-        """Yield (batch_idx, input_ids [B, L], ground_truth_indices)."""
+    def batches(
+        self,
+    ) -> Iterator[tuple[int, torch.Tensor, list[int], torch.Tensor | None]]:
+        """Yield (batch_idx, input_ids [B, L], ground_truth_indices, attention_mask [B, L]).
+
+        attention_mask is None when batch_size == 1 (no padding needed).
+        """
         items = self._items
         for i in range(0, len(items), self._batch_size):
             batch_items = items[i : i + self._batch_size]
@@ -168,7 +175,9 @@ class _MMLUBatches:
                 truncation=True,
                 max_length=512,
             )
-            yield i // self._batch_size, encoded.input_ids, labels
+            # Only include mask when there is actual padding (batch_size > 1).
+            mask = encoded.attention_mask if len(batch_items) > 1 else None
+            yield i // self._batch_size, encoded.input_ids, labels, mask
 
     def num_batches(self) -> int:
         """Return the total number of batches."""
@@ -273,7 +282,10 @@ class LlamaDataClient:
         lock = asyncio.Lock()
 
         async def _send_one(
-            batch_idx: int, input_ids: torch.Tensor, labels: list[int]
+            batch_idx: int,
+            input_ids: torch.Tensor,
+            labels: list[int],
+            attention_mask: torch.Tensor | None,
         ) -> None:
             task_id = f"{run_id}_{batch_idx}_{uuid.uuid4().hex[:6]}"
             async with semaphore:
@@ -287,6 +299,7 @@ class LlamaDataClient:
                     await _send_batch_to_node(
                         task_id=task_id,
                         input_ids=input_ids,
+                        attention_mask=attention_mask,
                         first_node_url=first_node_url,
                         callback_url=self.callback_url,
                         experiment_id=exp.name,
@@ -370,8 +383,8 @@ class LlamaDataClient:
                     records.append(record)
 
         tasks = [
-            asyncio.create_task(_send_one(idx, input_ids, labels))
-            for idx, input_ids, labels in loader.batches()
+            asyncio.create_task(_send_one(idx, input_ids, labels, mask))
+            for idx, input_ids, labels, mask in loader.batches()
         ]
         await asyncio.gather(*tasks)
         logger.info(
@@ -438,6 +451,7 @@ async def _send_batch_to_node(
     callback_url: str,
     experiment_id: str,
     run_id: str,
+    attention_mask: torch.Tensor | None = None,
 ) -> None:
     """Pickle and POST a tokenized batch to the first pipeline node.
 
@@ -448,14 +462,21 @@ async def _send_batch_to_node(
         callback_url: URL the last node should POST results to.
         experiment_id: Experiment name for metrics tagging.
         run_id: Run identifier for metrics tagging.
+        attention_mask: Optional padding mask [B, L]; present only for MMLU
+            batches with batch_size > 1.
     """
     raw = base64.b64encode(pickle.dumps(input_ids)).decode()
-    payload = {
+    payload: dict[str, str | None] = {
         "task_id": task_id,
         "callback_url": callback_url,
         "experiment_id": experiment_id,
         "run_id": run_id,
         "data": raw,
+        "attention_mask": (
+            base64.b64encode(pickle.dumps(attention_mask.bool())).decode()
+            if attention_mask is not None
+            else None
+        ),
     }
     async with httpx.AsyncClient(timeout=30.0) as client:
         resp = await client.post(first_node_url, json=payload)

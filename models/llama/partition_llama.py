@@ -44,6 +44,45 @@ _DTYPE_MAP = {
 
 
 # ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _make_causal_4d_mask(
+    attention_mask_2d: torch.Tensor,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    """Convert a 2D padding mask [B, L] to a 4D causal additive mask [B, 1, L, L].
+
+    Valid positions receive 0.0; masked (PAD or future) positions receive -inf.
+    This is the format expected by LlamaSdpaAttention when attention_mask is not None.
+
+    Args:
+        attention_mask_2d: Boolean or int tensor [B, L], 1 = real token, 0 = PAD.
+        dtype: Target float dtype matching the model weights.
+
+    Returns:
+        Additive causal mask of shape [B, 1, L, L].
+    """
+    B, L = attention_mask_2d.shape
+    device = attention_mask_2d.device
+    neg_inf = torch.finfo(dtype).min
+    # Lower-triangular causal mask [1, 1, L, L]
+    causal = (
+        torch.tril(torch.ones(L, L, device=device, dtype=dtype))
+        .unsqueeze(0)
+        .unsqueeze(0)
+    )
+    # Padding mask broadcast over target positions [B, 1, 1, L]
+    padding = attention_mask_2d.to(dtype=dtype)[:, None, None, :]
+    # Attend only where both causal and not padded
+    combined = causal * padding  # [B, 1, L, L]
+    return torch.where(
+        combined > 0, torch.zeros_like(combined), torch.full_like(combined, neg_inf)
+    )
+
+
+# ---------------------------------------------------------------------------
 # Partition modules
 # ---------------------------------------------------------------------------
 
@@ -65,11 +104,19 @@ class LlamaPartition1(nn.Module):
         self.layers = layers
         self.rotary_emb = rotary_emb
 
-    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         """Embed tokens and run the first 11 decoder layers.
 
         Args:
             input_ids: Token IDs of shape [B, L].
+            attention_mask: Optional 2D padding mask [B, L] (1=real, 0=PAD).
+                When provided, converted to a 4D causal additive mask so PAD
+                tokens do not contaminate attention. When None, SDPA uses
+                is_causal=True (correct for batch_size=1 or uniform-length batches).
 
         Returns:
             Hidden states of shape [B, L, hidden_size].
@@ -80,10 +127,17 @@ class LlamaPartition1(nn.Module):
             torch.arange(L, device=input_ids.device).unsqueeze(0).expand(B, -1)
         )
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
+        mask_4d = (
+            _make_causal_4d_mask(
+                attention_mask.to(input_ids.device), hidden_states.dtype
+            )
+            if attention_mask is not None
+            else None
+        )
         for layer in self.layers:
             hidden_states = layer(
                 hidden_states,
-                attention_mask=None,
+                attention_mask=mask_4d,
                 position_ids=position_ids,
                 position_embeddings=position_embeddings,
                 use_cache=False,
@@ -104,11 +158,16 @@ class LlamaPartition2(nn.Module):
         self.layers = layers
         self.rotary_emb = rotary_emb
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         """Run 11 middle decoder layers.
 
         Args:
             hidden_states: Float tensor of shape [B, L, hidden_size].
+            attention_mask: Optional 2D padding mask [B, L] (1=real, 0=PAD).
 
         Returns:
             Hidden states of shape [B, L, hidden_size].
@@ -118,10 +177,17 @@ class LlamaPartition2(nn.Module):
             torch.arange(L, device=hidden_states.device).unsqueeze(0).expand(B, -1)
         )
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
+        mask_4d = (
+            _make_causal_4d_mask(
+                attention_mask.to(hidden_states.device), hidden_states.dtype
+            )
+            if attention_mask is not None
+            else None
+        )
         for layer in self.layers:
             hidden_states = layer(
                 hidden_states,
-                attention_mask=None,
+                attention_mask=mask_4d,
                 position_ids=position_ids,
                 position_embeddings=position_embeddings,
                 use_cache=False,
@@ -152,11 +218,16 @@ class LlamaPartition3(nn.Module):
         self.lm_head = lm_head
         self.rotary_emb = rotary_emb
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         """Run the final 10 decoder layers, norm, and project to vocab logits.
 
         Args:
             hidden_states: Float tensor of shape [B, L, hidden_size].
+            attention_mask: Optional 2D padding mask [B, L] (1=real, 0=PAD).
 
         Returns:
             Logits of shape [B, L, vocab_size].
@@ -166,10 +237,17 @@ class LlamaPartition3(nn.Module):
             torch.arange(L, device=hidden_states.device).unsqueeze(0).expand(B, -1)
         )
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
+        mask_4d = (
+            _make_causal_4d_mask(
+                attention_mask.to(hidden_states.device), hidden_states.dtype
+            )
+            if attention_mask is not None
+            else None
+        )
         for layer in self.layers:
             hidden_states = layer(
                 hidden_states,
-                attention_mask=None,
+                attention_mask=mask_4d,
                 position_ids=position_ids,
                 position_embeddings=position_embeddings,
                 use_cache=False,
