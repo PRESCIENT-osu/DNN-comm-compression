@@ -121,6 +121,15 @@ class PipelineNodeState:
         self.incoming = incoming
         self.outgoing = outgoing
 
+    @property
+    def model_dtype(self) -> torch.dtype | None:
+        """dtype of the loaded partitions, or None if partitions have no parameters."""
+        for partition in self.partitions:
+            param = next(iter(partition.parameters()), None)
+            if param is not None:
+                return param.dtype
+        return None
+
 
 class MultiNodeState:
     """Mutable runtime state for the multi-model node server.
@@ -418,6 +427,11 @@ async def _process_task(state: MultiNodeState, item: QueueItem) -> None:
     try:
         raw_bytes = base64.b64decode(request.data)
 
+        # Deserialize attention_mask if present (MMLU batches with batch_size > 1).
+        attention_mask: torch.Tensor | None = None
+        if request.attention_mask is not None:
+            attention_mask = pickle.loads(base64.b64decode(request.attention_mask))
+
         # Decompress incoming activation (skip for first node in this pipeline).
         if ps.is_first_node:
             tensor: torch.Tensor = pickle.loads(raw_bytes)
@@ -429,6 +443,8 @@ async def _process_task(state: MultiNodeState, item: QueueItem) -> None:
                 regular_precision=ps.incoming.regular_precision,
             )
             tensor = compressor.decompress(raw_bytes, state.device)
+            if ps.model_dtype is not None and tensor.dtype != ps.model_dtype:
+                tensor = tensor.to(ps.model_dtype)
             state.emitter.emit(
                 DecompressEvent(
                     experiment_id=request.experiment_id,
@@ -444,7 +460,12 @@ async def _process_task(state: MultiNodeState, item: QueueItem) -> None:
         t0 = time.perf_counter()
         with torch.no_grad():
             for partition in ps.partitions:
-                tensor = partition(tensor.to(state.device))
+                if attention_mask is not None:
+                    tensor = partition(
+                        tensor.to(state.device), attention_mask=attention_mask
+                    )
+                else:
+                    tensor = partition(tensor.to(state.device))
         compute_end = time.time()
         state.emitter.emit(
             ForwardPassEvent(
@@ -593,6 +614,7 @@ async def _forward_to_next(
         "experiment_id": request.experiment_id,
         "run_id": request.run_id,
         "data": base64.b64encode(compressed).decode(),
+        "attention_mask": request.attention_mask,  # None for ResNet/WikiText; forwarded as-is
     }
     async with httpx.AsyncClient(timeout=30.0) as client:
         resp = await client.post(next_url, json=payload)
@@ -611,7 +633,9 @@ async def _send_result(task_id: str, callback_url: str, result_bytes: bytes) -> 
         "task_id": task_id,
         "data": base64.b64encode(result_bytes).decode(),
     }
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    # Large Llama logit tensors can take >30s to write; use a generous write timeout.
+    timeout = httpx.Timeout(connect=10.0, write=120.0, read=30.0, pool=5.0)
+    async with httpx.AsyncClient(timeout=timeout) as client:
         resp = await client.post(callback_url, json=payload)
         resp.raise_for_status()
 
