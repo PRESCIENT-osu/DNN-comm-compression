@@ -1,0 +1,3 @@
+[submodule "external/Inference_Optimizer"]
+	path = external/Inference_Optimizer
+	url = school:Peyman-gholami/Inference_Optimizer.git

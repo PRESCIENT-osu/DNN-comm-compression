@@ -18,9 +18,11 @@ $(VENV):
 	python -m venv $(VENV)
 
 install: $(VENV)
+	git submodule update --init --recursive
 	$(PIP) install -e .
 
 install-dev: $(VENV)
+	git submodule update --init --recursive
 	$(PIP) install -e ".[dev]"
 	$(VENV)/bin/pre-commit install
 
