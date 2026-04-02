@@ -9,7 +9,9 @@ import yaml
 from framework.datamodels.experiment import ExperimentConfig
 from framework.datamodels.infra import InfraConfig
 from framework.datamodels.multi_experiment import MultiExperimentConfig
+from framework.datamodels.opt_experiment import GeneratedOptExperimentConfig
 from framework.datamodels.spec import GeneratedExperimentConfig
+from framework.utils.topology import validate_linear_topology
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +94,45 @@ def load_multi_experiment_config(path: Path) -> MultiExperimentConfig:
     with open(path) as f:
         data = yaml.safe_load(f)
     return MultiExperimentConfig.model_validate(data)
+
+
+def is_opt_experiment(path: Path) -> bool:
+    """Return True if the experiment YAML is a generated optimization experiment.
+
+    Optimization experiments (produced by tools/generate.py --opt) have an
+    ``optimization_loop`` key at the top level.
+
+    Args:
+        path: Path to the experiment YAML file.
+
+    Returns:
+        True if the file uses the optimization experiment format.
+    """
+    with open(path) as f:
+        data = yaml.safe_load(f) or {}
+    return "optimization_loop" in data
+
+
+def load_opt_experiment_config(path: Path) -> GeneratedOptExperimentConfig:
+    """Load a generated optimization experiment config.
+
+    Validates that all pipeline flows are consistent with a single linear node
+    chain, as required by Inference_Optimizer algorithms.
+
+    Args:
+        path: Path to the experiment YAML file.
+
+    Returns:
+        Validated GeneratedOptExperimentConfig instance.
+
+    Raises:
+        ValueError: If the pipeline topology is not a linear chain.
+    """
+    with open(path) as f:
+        data = yaml.safe_load(f)
+    exp = GeneratedOptExperimentConfig.model_validate(data)
+    validate_linear_topology(exp.pipelines)
+    return exp
 
 
 def load_infra_config(path: Path) -> InfraConfig:

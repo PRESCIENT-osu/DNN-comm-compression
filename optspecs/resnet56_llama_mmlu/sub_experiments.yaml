@@ -1,0 +1,150 @@
+# Optimization sub-experiments for ResNet56 + Llama-MMLU.
+#
+# Executed sequentially in order.  Each type builds on the artifacts of
+# previous phases: profiling → accuracy_model → optimization loops.
+#
+# channel_estimator.experiment_name_contains is intentionally omitted here;
+# tools/generate.py --opt injects it automatically from the profile filename
+# stem (e.g. "100mbps") so probe history is scoped to the correct hardware
+# profile without modifying InfraConfig or any previously collected events.
+
+sub_experiments:
+
+  # -----------------------------------------------------------------------
+  # Phase 1: Profiling
+  # Runs profiling_batches inference rounds at η=1.0 on all links.
+  # Measures per-node compute latency (τ_i) and activation tensor sizes (a_i).
+  # Artifacts are reused by all subsequent sub-experiments.
+  # -----------------------------------------------------------------------
+  - name: profiling
+    type: profiling
+
+  # -----------------------------------------------------------------------
+  # Phase 2: Accuracy model training
+  # Trains a surrogate A_k(η) for each pipeline.
+  # Queries the metrics server for existing (η, accuracy) records first;
+  # if fewer than min_samples are found, runs a targeted sweep at sweep_rates.
+  # -----------------------------------------------------------------------
+  - name: accuracy_model_resnet
+    type: accuracy_model
+    pipeline_id: resnet-a
+    backend: surrogate
+    model_type: poly3
+    history_source: metrics_server
+    min_samples: 50
+    sweep_rates: [0.1, 0.2, 0.3, 0.5, 0.7, 0.8, 1.0]
+
+  - name: accuracy_model_llama
+    type: accuracy_model
+    pipeline_id: llama-mmlu-a
+    backend: surrogate
+    model_type: poly3
+    history_source: metrics_server
+    min_samples: 30
+    sweep_rates: [0.2, 0.4, 0.6, 0.8, 1.0]
+
+  # -----------------------------------------------------------------------
+  # Phase 3: No-CSI optimizer sweep over μ values
+  # Each μ in mu_sweep produces one independent optimization run.
+  # Uses the surrogate models trained above.
+  # -----------------------------------------------------------------------
+  - name: no_csi_mu_sweep
+    type: no_csi
+    mu_sweep: [0.5, 1.0, 3.0, 10.0]
+    accuracy_model_ref: accuracy_model_resnet
+    channel_estimator:
+      type: moving_average
+      window_size: 10
+      history_source: metrics_server
+      # experiment_name_contains: injected by generator (e.g. "100mbps")
+      warmup_value_bps: 1.0e8
+
+  # -----------------------------------------------------------------------
+  # Phase 4: CSI-aware optimizer (closed-form η*)
+  # Uses LCB estimator for conservative channel capacity estimate.
+  # -----------------------------------------------------------------------
+  - name: csi_aware
+    type: csi_aware
+    channel_estimator:
+      type: lcb
+      window_size: 20
+      z: 1.5
+      history_source: metrics_server
+      # experiment_name_contains: injected by generator
+      warmup_value_bps: 1.0e8
+
+  # -----------------------------------------------------------------------
+  # Phase 5: Baselines (single-task)
+  # -----------------------------------------------------------------------
+  - name: max_compression_single
+    type: max_compression_single
+
+  - name: no_compression_single
+    type: no_compression_single
+
+  - name: uniform_compression_single
+    type: uniform_compression_single
+    channel_estimator:
+      type: moving_average
+      window_size: 10
+      warmup_value_bps: 1.0e8
+
+  - name: myopic_single
+    type: estimated_csi_single
+    channel_estimator:
+      type: last_observation
+      warmup_value_bps: 1.0e8
+
+  # -----------------------------------------------------------------------
+  # Phase 6: Multi-task baselines
+  # -----------------------------------------------------------------------
+  - name: max_compression_multi
+    type: max_compression_multi
+
+  - name: no_compression_multi
+    type: no_compression_multi
+
+  - name: static_equal_share
+    type: static_equal_share
+    channel_estimator:
+      type: moving_average
+      window_size: 10
+      warmup_value_bps: 1.0e8
+
+  - name: proportional_resource
+    type: proportional_resource
+    channel_estimator:
+      type: moving_average
+      window_size: 10
+      warmup_value_bps: 1.0e8
+
+  - name: strict_priority_greedy
+    type: strict_priority_greedy
+    channel_estimator:
+      type: moving_average
+      window_size: 10
+      warmup_value_bps: 1.0e8
+
+  - name: decoupled_descent
+    type: decoupled_descent
+    mu: 1.0
+    epsilon: 0.1
+    channel_estimator:
+      type: moving_average
+      window_size: 10
+      warmup_value_bps: 1.0e8
+
+  - name: queue_proportional
+    type: queue_proportional
+    mu: 1.0
+    epsilon: 0.1
+    channel_estimator:
+      type: moving_average
+      window_size: 10
+      warmup_value_bps: 1.0e8
+
+  - name: historical_average_ce
+    type: historical_average_ce
+    channel_estimator:
+      type: mean
+      warmup_value_bps: 1.0e8

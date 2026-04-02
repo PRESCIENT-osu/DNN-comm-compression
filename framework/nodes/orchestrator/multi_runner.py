@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
+import itertools
 import logging
 import math
 import os
@@ -19,6 +20,7 @@ import time
 import uuid
 from collections.abc import AsyncGenerator, Iterator
 from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -54,6 +56,85 @@ logging.basicConfig(
     level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s"
 )
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# SlotResult — returned by MultiDataClient.run_slot()
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class SlotResult:
+    """Aggregated results for one optimization slot.
+
+    Attributes:
+        per_pipeline_latency_ms: Per-pipeline list of task E2E latencies (ms).
+        per_pipeline_results: Per-pipeline list of (labels, decoded) pairs.
+        wall_time_s: Wall-clock duration of the slot in seconds.
+    """
+
+    per_pipeline_latency_ms: dict[str, list[float]] = field(default_factory=dict)
+    per_pipeline_results: dict[str, list[tuple[list[int], Any]]] = field(
+        default_factory=dict
+    )
+    wall_time_s: float = 0.0
+
+    def achieved_rps(self, pipeline_id: str) -> float:
+        """Return observed task throughput for a pipeline (tasks/second).
+
+        Args:
+            pipeline_id: Pipeline identifier.
+
+        Returns:
+            Completed tasks divided by wall_time_s; 0.0 if wall_time_s is zero.
+        """
+        n = len(self.per_pipeline_latency_ms.get(pipeline_id, []))
+        return n / self.wall_time_s if self.wall_time_s > 0 else 0.0
+
+    def accuracy(self, pipeline_id: str) -> float:
+        """Return task accuracy for a pipeline (0.0–1.0).
+
+        Applicable to classification and MMLU pipelines.  Returns 0.0 for
+        perplexity pipelines (where decoded results are (nll_sum, token_count)
+        tuples rather than predicted index lists).
+
+        Args:
+            pipeline_id: Pipeline identifier.
+
+        Returns:
+            Fraction of correctly predicted samples; 0.0 if no results or
+            if the pipeline uses a perplexity metric.
+        """
+        pairs = self.per_pipeline_results.get(pipeline_id, [])
+        if not pairs:
+            return 0.0
+        _, first = pairs[0]
+        if not isinstance(first, list):
+            return 0.0
+        correct = sum(
+            1
+            for labels, predicted in pairs
+            for gt, pred in zip(labels, predicted, strict=False)
+            if gt == pred
+        )
+        total = sum(len(labels) for labels, _ in pairs)
+        return correct / total if total > 0 else 0.0
+
+
+# ---------------------------------------------------------------------------
+# _RunHandle — lightweight run identifier used by run_slot
+# ---------------------------------------------------------------------------
+
+
+class _RunHandle:
+    """Minimal run descriptor accepted by _send_one in slot context.
+
+    Args:
+        run_id: Slot-scoped run identifier.
+    """
+
+    def __init__(self, run_id: str) -> None:
+        self.run_id = run_id
 
 
 # ---------------------------------------------------------------------------
@@ -496,7 +577,7 @@ class MultiDataClient:
         labels: list[int],
         loader: _PipelineLoader,
         first_node_url: str,
-        run: MultiResolvedRun,
+        run: MultiResolvedRun | _RunHandle,
         semaphore: asyncio.Semaphore | None,
         latencies: dict[str, list[float]],
         results: dict[str, list[tuple[list[int], Any]]],
@@ -587,6 +668,93 @@ class MultiDataClient:
                 await _execute()
         else:
             await _execute()
+
+    async def run_slot(
+        self,
+        n_batches: int,
+        run_id: str,
+        node_host: str | None,
+        emitter: MetricsEmitter,
+    ) -> SlotResult:
+        """Submit n_batches tasks for one optimization slot and collect results.
+
+        Distributes batches across pipelines according to ``exp.workload.mix``.
+        Uses the fill (sliding-window) concurrency pattern with
+        ``window_per_pipeline`` in-flight tasks per pipeline.
+
+        Args:
+            n_batches: Total number of batches to submit across all pipelines.
+            run_id: Slot-scoped run identifier (used for event tagging).
+            node_host: Optional node hostname override.
+            emitter: Metrics emitter for TaskE2EEvent emission.
+
+        Returns:
+            SlotResult with per-pipeline latencies and decoded results.
+        """
+        exp = self._exp
+        loaders = self._build_loaders()
+        latencies: dict[str, list[float]] = {p.name: [] for p in exp.pipelines}
+        results: dict[str, list[tuple[list[int], Any]]] = {
+            p.name: [] for p in exp.pipelines
+        }
+        lock = asyncio.Lock()
+        wall_start = time.perf_counter()
+
+        # Distribute n_batches across pipelines by mix weight.
+        mix = exp.workload.mix or {}
+        total_mix = sum(mix.get(p.name, 1.0) for p in exp.pipelines)
+        counts: dict[str, int] = {}
+        allocated = 0
+        pipelines = list(exp.pipelines)
+        for i, pipeline in enumerate(pipelines):
+            w = mix.get(pipeline.name, 1.0)
+            if i == len(pipelines) - 1:
+                counts[pipeline.name] = max(0, n_batches - allocated)
+            else:
+                c = round(n_batches * w / total_mix)
+                counts[pipeline.name] = c
+                allocated += c
+
+        window = exp.workload.window_per_pipeline or 1
+        semaphores = {p.name: asyncio.Semaphore(window) for p in exp.pipelines}
+        run_handle = _RunHandle(run_id)
+        all_tasks: list[asyncio.Task[None]] = []
+
+        for pipeline in exp.pipelines:
+            node = exp.node_for(pipeline.flow[0])
+            first_node_url = f"http://{node_host or node.host}:{node.port}/infer"
+            loader = loaders[pipeline.name]
+            count = counts[pipeline.name]
+
+            for batch_idx, input_tensor, labels in itertools.islice(
+                loader.batches(), count
+            ):
+                task = asyncio.create_task(
+                    self._send_one(
+                        pipeline_id=pipeline.name,
+                        batch_idx=batch_idx,
+                        input_tensor=input_tensor,
+                        labels=labels,
+                        loader=loader,
+                        first_node_url=first_node_url,
+                        run=run_handle,
+                        semaphore=semaphores[pipeline.name],
+                        latencies=latencies,
+                        results=results,
+                        lock=lock,
+                        emitter=emitter,
+                    )
+                )
+                all_tasks.append(task)
+
+        await asyncio.gather(*all_tasks)
+        wall_time_s = time.perf_counter() - wall_start
+
+        return SlotResult(
+            per_pipeline_latency_ms=latencies,
+            per_pipeline_results=results,
+            wall_time_s=wall_time_s,
+        )
 
     def _make_app(self) -> FastAPI:
         """Build the FastAPI callback app with /result and /health endpoints."""

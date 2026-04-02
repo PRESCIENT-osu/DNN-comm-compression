@@ -50,9 +50,11 @@ logger = logging.getLogger(__name__)
 
 SPECS_DIR = Path("specs")
 MULTISPECS_DIR = Path("multispecs")
+OPTSPECS_DIR = Path("optspecs")
 PROFILES_DIR = Path("profiles")
 EXPERIMENTS_DIR = Path("experiments")
 MULTI_EXPERIMENTS_DIR = Path("experiments") / "multi"
+OPT_EXPERIMENTS_DIR = Path("experiments") / "opt"
 
 
 # ---------------------------------------------------------------------------
@@ -664,6 +666,289 @@ def _generate_all_multi(
 
 
 # ---------------------------------------------------------------------------
+# Optimization experiment generation
+# ---------------------------------------------------------------------------
+
+
+def load_opt_spec(spec_dir: Path) -> dict[str, Any]:
+    """Load an optimization spec from optspecs/<name>/experiment.yaml.
+
+    Opt specs are flat (no hierarchical merge).
+
+    Args:
+        spec_dir: Path to the optspec directory (e.g. optspecs/resnet56_llama_mmlu).
+
+    Returns:
+        Spec config dict.
+
+    Raises:
+        FileNotFoundError: If experiment.yaml is not found.
+    """
+    yaml_path = spec_dir / "experiment.yaml"
+    if not yaml_path.exists():
+        raise FileNotFoundError(f"Opt spec not found: {yaml_path}")
+    return _load_yaml(yaml_path)
+
+
+def load_opt_sub_experiments(spec_dir: Path) -> list[dict[str, Any]]:
+    """Load sub-experiments from optspecs/<name>/sub_experiments.yaml.
+
+    Unlike multispecs (which use a named dict), opt sub-experiments are an
+    ordered list because execution order is semantically meaningful.
+
+    Args:
+        spec_dir: Path to the optspec directory.
+
+    Returns:
+        Ordered list of sub-experiment config dicts.
+
+    Raises:
+        FileNotFoundError: If sub_experiments.yaml is not found.
+    """
+    yaml_path = spec_dir / "sub_experiments.yaml"
+    if not yaml_path.exists():
+        raise FileNotFoundError(f"Opt sub_experiments not found: {yaml_path}")
+    data = _load_yaml(yaml_path)
+    return data.get("sub_experiments", [])
+
+
+def validate_opt_compatibility(spec: dict[str, Any], profile: dict[str, Any]) -> None:
+    """Ensure node names in the opt spec and profile match exactly.
+
+    In opt specs, nodes is a list of name strings (same as multispecs).
+
+    Args:
+        spec: Opt spec dict (nodes is a list of name strings).
+        profile: Profile dict.
+
+    Raises:
+        ValueError: If node name sets differ.
+    """
+    spec_nodes = set(spec.get("nodes", []))
+    profile_nodes = {n["name"] for n in profile.get("nodes", [])}
+    if not profile_nodes:
+        return
+    if spec_nodes != profile_nodes:
+        raise ValueError(
+            f"Node name mismatch between opt spec and profile.\n"
+            f"  Spec nodes:    {sorted(spec_nodes)}\n"
+            f"  Profile nodes: {sorted(profile_nodes)}"
+        )
+
+
+def derive_opt_name(spec_dir: Path, profile_file: Path) -> str:
+    """Derive the canonical experiment name for an optimization experiment.
+
+    Format: {spec_name}_{topology}_{profile_name}
+
+    This matches the multi-model naming convention so profile suffixes
+    (e.g. ``_100mbps``) can be used as ``experiment_name_contains`` filters
+    when querying the metrics server for link probe history.
+
+    Args:
+        spec_dir: Path to the optspec directory (e.g. optspecs/resnet56_llama_mmlu).
+        profile_file: Path to the profile YAML file.
+
+    Returns:
+        Experiment name string.
+    """
+    spec_name = spec_dir.relative_to(OPTSPECS_DIR).parts[0]
+    profile_parts = profile_file.relative_to(PROFILES_DIR).parts
+    topology = profile_parts[0]
+    profile_name = profile_file.stem
+    return f"{spec_name}_{topology}_{profile_name}"
+
+
+def _inject_channel_estimator_context(
+    sub_experiments: list[dict[str, Any]],
+    profile_name: str,
+) -> list[dict[str, Any]]:
+    """Inject ``experiment_name_contains`` into channel_estimator configs.
+
+    For any sub-experiment that has a ``channel_estimator`` with
+    ``history_source: metrics_server`` and no ``experiment_name_contains``
+    already set, sets ``experiment_name_contains`` to the profile filename
+    stem (e.g. ``"100mbps"``).  This scopes probe history queries to the
+    correct hardware profile without modifying InfraConfig or existing events.
+
+    Args:
+        sub_experiments: List of raw sub-experiment config dicts.
+        profile_name: Profile filename stem (e.g. ``"100mbps"``).
+
+    Returns:
+        Deep copy of the list with context injected.
+    """
+    import copy
+
+    result = copy.deepcopy(sub_experiments)
+    for sub_exp in result:
+        ce = sub_exp.get("channel_estimator")
+        if isinstance(ce, dict) and ce.get("history_source") == "metrics_server":
+            if "experiment_name_contains" not in ce:
+                ce["experiment_name_contains"] = profile_name
+    return result
+
+
+def _materialise_opt(
+    spec_dir: Path,
+    profile_file: Path,
+    output_dir: Path,
+    sub_experiment_filter: list[str] | None = None,
+) -> Path:
+    """Generate one optimization experiment directory.
+
+    Merges the opt spec with a profile to produce a fully resolved
+    experiment.yaml and infra.yaml in experiments/opt/<name>/.
+
+    Node host/port values are taken from the profile; the spec provides only
+    node names.  Channel estimator configs with ``history_source: metrics_server``
+    have ``experiment_name_contains`` injected from the profile filename stem.
+
+    Args:
+        spec_dir: Path to the optspec directory.
+        profile_file: Path to the profile YAML file.
+        output_dir: Root directory for generated opt experiments.
+        sub_experiment_filter: If set, only include sub-experiments whose
+            ``name`` field is in this list.
+
+    Returns:
+        Path to the generated experiment directory.
+    """
+    spec = load_opt_spec(spec_dir)
+    all_sub_experiments = load_opt_sub_experiments(spec_dir)
+    profile = load_profile(profile_file)
+
+    validate_opt_compatibility(spec, profile)
+
+    exp_name = derive_opt_name(spec_dir, profile_file)
+    profile_name = profile_file.stem
+
+    if sub_experiment_filter:
+        names_in_spec = [s.get("name") for s in all_sub_experiments]
+        missing = set(sub_experiment_filter) - set(names_in_spec)
+        if missing:
+            raise ValueError(
+                f"Sub-experiments not found in spec '{spec_dir}': {sorted(missing)}\n"
+                f"Available: {sorted(n for n in names_in_spec if n)}"
+            )
+        selected = [
+            s for s in all_sub_experiments if s.get("name") in sub_experiment_filter
+        ]
+    else:
+        selected = all_sub_experiments
+
+    # Inject profile context into channel estimator configs.
+    selected = _inject_channel_estimator_context(selected, profile_name)
+
+    # Build node configs by merging spec node names with profile host/port.
+    profile_node_map = {n["name"]: n for n in profile.get("nodes", [])}
+    nodes: list[dict[str, Any]] = []
+    for node_name in spec.get("nodes", []):
+        profile_node = profile_node_map.get(node_name, {})
+        nodes.append(
+            {
+                "name": node_name,
+                "host": profile_node.get("host", node_name),
+                "port": profile_node.get("port", 8000),
+            }
+        )
+
+    # Build generated experiment.yaml.
+    generated: dict[str, Any] = {
+        "name": exp_name,
+        "nodes": nodes,
+        "pipelines": spec["pipelines"],
+        "datasets": spec["datasets"],
+        "workload": spec["workload"],
+        "tasks": spec["tasks"],
+        "links": spec["links"],
+        "optimization_loop": spec["optimization_loop"],
+        "metrics_server": spec["metrics_server"],
+        "artifacts_dir": f"artifacts/{exp_name}",
+        "sub_experiments": selected,
+    }
+
+    exp_dir = output_dir / exp_name
+    exp_dir.mkdir(parents=True, exist_ok=True)
+
+    _dump_yaml(generated, exp_dir / "experiment.yaml")
+    _dump_yaml(profile, exp_dir / "infra.yaml")
+
+    logger.info("Generated opt experiment: %s", exp_dir)
+    return exp_dir
+
+
+def _leaf_opt_specs() -> list[Path]:
+    """Return all optspec directories that have both required YAML files.
+
+    Returns:
+        Sorted list of valid optspec directory paths.
+    """
+    if not OPTSPECS_DIR.exists():
+        return []
+    candidates = sorted(
+        p.parent
+        for p in OPTSPECS_DIR.rglob("experiment.yaml")
+        if (p.parent / "sub_experiments.yaml").exists()
+    )
+    return candidates
+
+
+def _generate_all_opt(
+    output_dir: Path,
+    sub_experiment_filter: list[str] | None = None,
+) -> list[Path]:
+    """Generate experiments for all compatible optspec/profile pairs.
+
+    Skips incompatible combinations (node name mismatches) silently.
+
+    Args:
+        output_dir: Root directory for generated opt experiments.
+        sub_experiment_filter: If set, include only sub-experiments with
+            these names.
+
+    Returns:
+        List of generated experiment directory paths.
+    """
+    specs = _leaf_opt_specs()
+    profiles = sorted(PROFILES_DIR.rglob("*.yaml"))
+
+    logger.info(
+        "Found %d opt spec(s) and %d profile(s) — trying %d combination(s)",
+        len(specs),
+        len(profiles),
+        len(specs) * len(profiles),
+    )
+
+    generated: list[Path] = []
+    skipped = 0
+
+    for spec in specs:
+        for profile in profiles:
+            try:
+                exp_dir = _materialise_opt(
+                    spec, profile, output_dir, sub_experiment_filter
+                )
+                generated.append(exp_dir)
+            except ValueError as e:
+                if "Node name mismatch" in str(e) or "Sub-experiments not found" in str(
+                    e
+                ):
+                    skipped += 1
+                else:
+                    logger.error("Failed %s + %s: %s", spec, profile, e)
+            except (FileNotFoundError, KeyError) as e:
+                logger.error("Failed %s + %s: %s", spec, profile, e)
+
+    logger.info(
+        "Generated %d opt experiment(s), skipped %d incompatible combination(s)",
+        len(generated),
+        skipped,
+    )
+    return generated
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -673,7 +958,8 @@ def main() -> None:
         description=(
             "Generate fully resolved experiment directories from specs and profiles. "
             "Use --spec/--profile for a single experiment or --all for every "
-            "compatible combination.  Add --multi to operate on multispecs/ instead."
+            "compatible combination.  Add --multi for multispecs/ or --opt for "
+            "optspecs/."
         )
     )
     parser.add_argument(
@@ -682,6 +968,14 @@ def main() -> None:
         help=(
             "Generate multi-model experiments from multispecs/ "
             "(output goes to experiments/multi/ by default)"
+        ),
+    )
+    parser.add_argument(
+        "--opt",
+        action="store_true",
+        help=(
+            "Generate optimization experiments from optspecs/ "
+            "(output goes to experiments/opt/ by default)"
         ),
     )
     parser.add_argument(
@@ -733,8 +1027,14 @@ def main() -> None:
     if args.show_runs:
         args.validate = True
 
+    if args.multi and args.opt:
+        print("ERROR: --multi and --opt are mutually exclusive", file=sys.stderr)
+        sys.exit(1)
+
     output_dir = args.output_dir or (
-        MULTI_EXPERIMENTS_DIR if args.multi else EXPERIMENTS_DIR
+        OPT_EXPERIMENTS_DIR
+        if args.opt
+        else (MULTI_EXPERIMENTS_DIR if args.multi else EXPERIMENTS_DIR)
     )
 
     if args.all and (args.spec or args.profile):
@@ -745,7 +1045,26 @@ def main() -> None:
         print("ERROR: provide --spec and --profile, or use --all", file=sys.stderr)
         sys.exit(1)
 
-    if args.multi:
+    if args.opt:
+        if args.all:
+            generated = _generate_all_opt(output_dir, args.sub_experiments)
+            if not generated:
+                print("ERROR: no opt experiments were generated", file=sys.stderr)
+                sys.exit(1)
+        else:
+            try:
+                exp_dir = _materialise_opt(
+                    spec_dir=args.spec,
+                    profile_file=args.profile,
+                    output_dir=output_dir,
+                    sub_experiment_filter=args.sub_experiments,
+                )
+                print(exp_dir)
+                generated = [exp_dir]
+            except (FileNotFoundError, ValueError, KeyError) as exc:
+                print(f"ERROR: {exc}", file=sys.stderr)
+                sys.exit(1)
+    elif args.multi:
         if args.all:
             generated = _generate_all_multi(output_dir, args.sub_experiments)
             if not generated:

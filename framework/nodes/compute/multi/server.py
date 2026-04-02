@@ -1,10 +1,13 @@
 """Multi-model compute node server.
 
 Hosts partitions for multiple named pipelines on a single node.  Incoming
-inference requests from any pipeline are queued into a shared FIFO queue and
-processed serially by a single worker coroutine.  This exposes real compute
-contention between pipelines, which is measured via per-task timing and
-queue-snapshot metrics.
+inference requests are queued into a shared WFQ (Weighted Fair Queuing)
+priority queue and processed serially by a single worker coroutine.  WFQ
+enforces per-pipeline compute share weights: each task's virtual start time
+is set to ``virtual_time[pipeline_id]`` at enqueue; the worker always picks
+the task with the smallest virtual start time; after compute the pipeline's
+virtual clock advances by ``compute_seconds / weight[pipeline_id]``.  Weights
+can be updated at runtime via ``POST /config/weights``.
 
 Partition layout per pipeline is declared in the experiment config.  Each
 pipeline independently declares its execution flow and compression config.
@@ -40,6 +43,7 @@ import httpx
 import torch
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
 from framework.datamodels.api import MultiConfigUpdate, MultiInferRequest
 from framework.datamodels.events import (
@@ -67,20 +71,51 @@ _PROBE_PAYLOAD_BYTES = 100 * 1024  # 100 KB throughput probe payload
 # ---------------------------------------------------------------------------
 
 
+class ProbeMeasureRequest(BaseModel):
+    """Request body for POST /probe/measure (orchestrator-triggered link probe).
+
+    Args:
+        target_base_url: Base URL of the downstream node (e.g. ``http://node-b:8000``).
+        payload_bytes: Bytes to send in the throughput probe POST (default: 1 MiB).
+    """
+
+    target_base_url: str
+    payload_bytes: int = 1_048_576
+
+
+class PipelineWeightsUpdate(BaseModel):
+    """Request body for POST /config/weights (WFQ weight update).
+
+    Args:
+        weights: Mapping from pipeline_id to non-negative WFQ scheduling weight.
+    """
+
+    weights: dict[str, float]
+
+
 @dataclass
 class QueueItem:
-    """A single inference task waiting in the node's FIFO queue.
+    """A single inference task waiting in the node's WFQ priority queue.
 
     Args:
         request: The incoming inference request.
         enqueue_time: Wall-clock time when the item was enqueued (seconds).
         queue_length_at_enqueue: Number of items already in the queue at
             enqueue time (not including this item).
+        start_tag: WFQ virtual start time assigned at enqueue; equal to the
+            pipeline's virtual_time at the moment of enqueue.
+        seq: Monotonically increasing sequence number for tie-breaking when
+            two tasks share the same start_tag.
     """
 
     request: MultiInferRequest
     enqueue_time: float
     queue_length_at_enqueue: int
+    start_tag: float = 0.0
+    seq: int = 0
+
+    def __lt__(self, other: QueueItem) -> bool:
+        return (self.start_tag, self.seq) < (other.start_tag, other.seq)
 
 
 class PipelineNodeState:
@@ -134,6 +169,10 @@ class PipelineNodeState:
 class MultiNodeState:
     """Mutable runtime state for the multi-model node server.
 
+    Uses a WFQ priority queue keyed by each task's virtual start time.
+    Per-pipeline virtual clocks advance by ``compute_seconds / weight`` after
+    each task, enforcing proportional compute share across pipelines.
+
     Args:
         node_name: Name of this node.
         device: Torch device string (``"cuda"`` or ``"cpu"``).
@@ -159,7 +198,16 @@ class MultiNodeState:
         self.last_experiment_id: str = "unknown"
         self.last_run_id: str = "none"
 
-        self.queue: asyncio.Queue[QueueItem] = asyncio.Queue()
+        # WFQ state: uniform weights by default (updated via POST /config/weights).
+        n = max(len(pipelines), 1)
+        self.weights: dict[str, float] = {pid: 1.0 / n for pid in pipelines}
+        # Per-pipeline virtual clock: advances by compute_s / weight after each task.
+        self.virtual_times: dict[str, float] = {pid: 0.0 for pid in pipelines}
+        self._seq_counter: int = 0  # tie-breaker for equal virtual start times
+
+        # Priority queue: items are QueueItem instances; QueueItem.__lt__ orders by
+        # (start_tag, seq) so asyncio.PriorityQueue picks the WFQ-minimum.
+        self.queue: asyncio.PriorityQueue[QueueItem] = asyncio.PriorityQueue()
         # Set when queue is empty and worker is not processing; cleared otherwise.
         self.idle_event: asyncio.Event = asyncio.Event()
         self.idle_event.set()
@@ -172,6 +220,7 @@ class MultiNodeState:
             Dict mapping pipeline_id to number of items currently in the queue.
         """
         counts: dict[str, int] = {pid: 0 for pid in self.pipelines}
+        # asyncio.PriorityQueue stores items directly in _queue (a heap list).
         for item in list(self.queue._queue):  # type: ignore[attr-defined]
             pid = item.request.pipeline_id
             counts[pid] = counts.get(pid, 0) + 1
@@ -238,10 +287,15 @@ def build_app() -> FastAPI:
 
         enqueue_time = time.time()
         queue_len_before = state.queue.qsize()
+        # Assign WFQ virtual start time from this pipeline's current virtual clock.
+        start_tag = state.virtual_times.get(request.pipeline_id, 0.0)
+        state._seq_counter += 1
         item = QueueItem(
             request=request,
             enqueue_time=enqueue_time,
             queue_length_at_enqueue=queue_len_before,
+            start_tag=start_tag,
+            seq=state._seq_counter,
         )
         state.idle_event.clear()
         await state.queue.put(item)
@@ -351,18 +405,88 @@ def build_app() -> FastAPI:
             }
         )
 
+    @app.post("/config/weights")
+    async def update_weights(update: PipelineWeightsUpdate) -> JSONResponse:
+        """Update WFQ scheduling weights for one or more pipelines.
+
+        Weights need not sum to 1; the scheduler uses them as relative
+        proportions.  Unknown pipeline IDs are ignored.  Takes effect
+        immediately for tasks enqueued after this call.
+
+        Args:
+            update: Mapping from pipeline_id to new weight value.
+
+        Returns:
+            JSON object with the full updated weights map.
+        """
+        state = _state[0]
+        assert state is not None
+        for pid, w in update.weights.items():
+            if pid in state.pipelines:
+                if w <= 0:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Weight for pipeline '{pid}' must be > 0, got {w}",
+                    )
+                state.weights[pid] = w
+        logger.info("WFQ weights updated: %s", state.weights)
+        return JSONResponse({"status": "ok", "weights": state.weights})
+
     # -----------------------------------------------------------------------
     # Probe API
     # -----------------------------------------------------------------------
 
     @app.get("/probe")
     async def probe_rtt() -> JSONResponse:
+        """RTT probe target — receive-side ping for background link probers."""
         return JSONResponse({"status": "ok", "timestamp": time.time()})
 
     @app.post("/probe")
     async def probe_throughput(request: Request) -> JSONResponse:
+        """Throughput probe target — receive-side sink for background link probers."""
         body = await request.body()
         return JSONResponse({"received_bytes": len(body), "timestamp": time.time()})
+
+    @app.post("/probe/measure")
+    async def probe_measure(body: ProbeMeasureRequest) -> JSONResponse:
+        """Orchestrator-triggered on-demand link probe to a downstream node.
+
+        Sends an RTT ping and a throughput payload to the target node and
+        returns the measured values synchronously.  Used by the optimization
+        loop to update channel estimators at controlled slot boundaries,
+        independent of the background probe loop.
+
+        Args:
+            body: Target base URL and payload size for the throughput probe.
+
+        Returns:
+            JSON object with ``rtt_ms`` and ``throughput_mbps``.
+        """
+        target = body.target_base_url.rstrip("/")
+
+        # RTT probe: GET /probe on the target node.
+        t0 = time.perf_counter()
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            await client.get(f"{target}/probe")
+        rtt_ms = (time.perf_counter() - t0) * 1000.0
+
+        # Throughput probe: POST body.payload_bytes of zeros to /probe.
+        payload = bytes(body.payload_bytes)
+        t1 = time.perf_counter()
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(connect=10.0, write=120.0, read=30.0, pool=5.0)
+        ) as client:
+            await client.post(f"{target}/probe", content=payload)
+        elapsed_s = time.perf_counter() - t1
+        throughput_mbps = (body.payload_bytes * 8) / (elapsed_s * 1e6)
+
+        logger.debug(
+            "On-demand probe → %s: rtt=%.1fms throughput=%.1fMbps",
+            target,
+            rtt_ms,
+            throughput_mbps,
+        )
+        return JSONResponse({"rtt_ms": rtt_ms, "throughput_mbps": throughput_mbps})
 
     return app
 
@@ -375,6 +499,10 @@ def build_app() -> FastAPI:
 async def _worker_loop(state: MultiNodeState) -> None:
     """Single worker coroutine — dequeues and processes one task at a time.
 
+    Picks the task with the smallest WFQ virtual start time (minimum priority
+    in the PriorityQueue).  After each task, advances the pipeline's virtual
+    clock by ``compute_seconds / weight`` to enforce s_comp shares.
+
     Emits a QueueSnapshotEvent at dequeue and a TaskNodeTimingEvent after
     each task completes.
 
@@ -384,8 +512,14 @@ async def _worker_loop(state: MultiNodeState) -> None:
     while True:
         item = await state.queue.get()
         state._processing = True
+        pipeline_id = item.request.pipeline_id
         try:
-            await _process_task(state, item)
+            compute_seconds = await _process_task(state, item)
+            # Advance this pipeline's virtual clock by compute_s / weight.
+            weight = state.weights.get(pipeline_id, 1.0)
+            state.virtual_times[pipeline_id] = (
+                state.virtual_times.get(pipeline_id, 0.0) + compute_seconds / weight
+            )
         except Exception:
             logger.exception(
                 "Unhandled error processing task '%s'", item.request.task_id
@@ -397,7 +531,7 @@ async def _worker_loop(state: MultiNodeState) -> None:
                 state.idle_event.set()
 
 
-async def _process_task(state: MultiNodeState, item: QueueItem) -> None:
+async def _process_task(state: MultiNodeState, item: QueueItem) -> float:
     """Execute one inference task from the queue.
 
     Records per-stage timing and emits TaskNodeTimingEvent on completion.
@@ -405,11 +539,16 @@ async def _process_task(state: MultiNodeState, item: QueueItem) -> None:
     Args:
         state: Shared multi-model node state.
         item: Dequeued task item.
+
+    Returns:
+        Forward-pass compute time in seconds, used by the WFQ worker to
+        advance the pipeline's virtual clock.
     """
     request = item.request
     ps = state.pipelines[request.pipeline_id]
 
     compute_start = time.time()
+    compute_seconds: float = 0.0
 
     state.emitter.emit(
         QueueSnapshotEvent(
@@ -467,6 +606,7 @@ async def _process_task(state: MultiNodeState, item: QueueItem) -> None:
                 else:
                     tensor = partition(tensor.to(state.device))
         compute_end = time.time()
+        compute_seconds = compute_end - compute_start
         state.emitter.emit(
             ForwardPassEvent(
                 experiment_id=request.experiment_id,
@@ -494,7 +634,7 @@ async def _process_task(state: MultiNodeState, item: QueueItem) -> None:
                 compress_end,
                 sent_time,
             )
-            return
+            return compute_seconds
 
         # Compress and forward to next node.
         compress_start = time.time()
@@ -548,6 +688,7 @@ async def _process_task(state: MultiNodeState, item: QueueItem) -> None:
             compress_end,
             sent_time,
         )
+        return compute_seconds
 
     except Exception:
         logger.exception(
@@ -555,6 +696,7 @@ async def _process_task(state: MultiNodeState, item: QueueItem) -> None:
             request.task_id,
             request.pipeline_id,
         )
+        return compute_seconds
 
 
 def _emit_timing(

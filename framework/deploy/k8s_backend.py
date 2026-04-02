@@ -9,6 +9,7 @@ import yaml
 from framework.datamodels.experiment import ExperimentConfig
 from framework.datamodels.infra import InfraConfig, InfraLinkConfig
 from framework.datamodels.multi_experiment import MultiExperimentConfig
+from framework.datamodels.opt_experiment import GeneratedOptExperimentConfig
 
 
 def _compute_node_module(model: str) -> str:
@@ -647,6 +648,181 @@ def _multi_node_pod(
                     "hostPath": {"path": str(experiments_dir.resolve())},
                 },
             ],
+        },
+    }
+
+
+def generate_opt(
+    exp: GeneratedOptExperimentConfig,
+    infra: InfraConfig,
+    image: str,
+    partitions_base_dir: Path,
+    metrics_data_dir: Path,
+    experiment_config_path: Path,
+    namespace: str = "default",
+    dataset_base_dir: Path | None = None,
+    artifacts_dir: Path | None = None,
+) -> str:
+    """Generate Kubernetes manifests for an optimization experiment.
+
+    Node pods are identical to ``generate_multi`` (dnn-compute-multi image).
+    The orchestrator Job runs ``opt_runner`` and mounts a writable
+    ``artifacts_dir`` for profiling artifacts and accuracy models.
+
+    Args:
+        exp: Generated optimization experiment configuration.
+        infra: Infrastructure configuration.
+        image: Base image tag.
+        partitions_base_dir: Host path to the partitions base directory.
+        metrics_data_dir: Host path for metrics NDJSON storage.
+        experiment_config_path: Host path to the generated experiment.yaml.
+        namespace: Kubernetes namespace to deploy into.
+        dataset_base_dir: Host path to the base datasets directory.
+        artifacts_dir: Host path for optimizer artifact storage (writable).
+            Defaults to ``Path("artifacts")`` if not provided.
+
+    Returns:
+        Multi-document YAML string suitable for ``kubectl apply -f``.
+    """
+    docs: list[dict[str, Any]] = []
+    tag = image.split(":")[-1] if ":" in image else "latest"
+    multi_image = f"dnn-compute-multi:{tag}"
+    metrics_image = f"dnn-metrics:{tag}"
+    orchestrator_image = f"dnn-orchestrator:{tag}"
+    experiments_dir = experiment_config_path.parent.parent
+
+    docs.append(_metrics_pod(exp, infra, metrics_image, metrics_data_dir, namespace))  # type: ignore[arg-type]
+    docs.append(_metrics_service(exp, infra, namespace))  # type: ignore[arg-type]
+
+    outgoing_links: dict[str, list[InfraLinkConfig]] = defaultdict(list)
+    for link in infra.links:
+        if any([link.bandwidth_mbps, link.delay_ms, link.loss_pct]):
+            outgoing_links[link.from_node].append(link)
+
+    node_host_map = {n.name: n.host for n in exp.nodes}
+
+    for node in exp.nodes:
+        infra_node = next((n for n in infra.nodes if n.name == node.name), None)
+        docs.append(
+            _multi_node_pod(
+                node_cfg=node,
+                infra_node=infra_node,
+                exp=exp,  # type: ignore[arg-type]
+                image=multi_image,
+                partitions_base_dir=partitions_base_dir,
+                experiments_dir=experiments_dir,
+                namespace=namespace,
+                outgoing_links=outgoing_links.get(node.name, []),
+                node_host_map=node_host_map,
+            )
+        )
+        docs.append(_node_service(node, infra_node, namespace))
+
+    if dataset_base_dir is not None:
+        docs.append(
+            _opt_orchestrator_job(
+                exp=exp,
+                image=orchestrator_image,
+                experiment_config_path=experiment_config_path,
+                dataset_base_dir=dataset_base_dir,
+                artifacts_dir=artifacts_dir or Path("artifacts"),
+                namespace=namespace,
+            )
+        )
+
+    return "---\n".join(
+        yaml.dump(doc, default_flow_style=False, sort_keys=False) for doc in docs
+    )
+
+
+def _opt_orchestrator_job(
+    exp: GeneratedOptExperimentConfig,
+    image: str,
+    experiment_config_path: Path,
+    dataset_base_dir: Path,
+    artifacts_dir: Path,
+    namespace: str,
+) -> dict[str, Any]:
+    """Generate a Kubernetes Job manifest for the optimization orchestrator.
+
+    Identical structure to ``_multi_orchestrator_job`` except the runner
+    module is ``opt_runner`` and an additional writable ``artifacts`` volume
+    is mounted at the path declared in ``exp.artifacts_dir``.
+
+    Args:
+        exp: Generated optimization experiment configuration.
+        image: Orchestrator image name.
+        experiment_config_path: Host path to experiment.yaml.
+        dataset_base_dir: Host path to the base datasets directory.
+        artifacts_dir: Host path for optimizer artifact storage (writable).
+        namespace: Kubernetes namespace.
+
+    Returns:
+        Job manifest dict.
+    """
+    job_name = f"{exp.name.lower().replace('_', '-')}-orchestrator"
+    container_artifacts = _abs_container_path(exp.artifacts_dir)
+
+    volume_mounts: list[dict[str, Any]] = [
+        {"name": "experiment-dir", "mountPath": "/app/experiments", "readOnly": True},
+        {"name": "datasets", "mountPath": "/app/.datasets"},
+        {"name": "artifacts", "mountPath": container_artifacts},
+    ]
+    volumes: list[dict[str, Any]] = [
+        {
+            "name": "experiment-dir",
+            "hostPath": {"path": str(experiment_config_path.parent.parent.resolve())},
+        },
+        {"name": "datasets", "hostPath": {"path": str(dataset_base_dir.resolve())}},
+        {"name": "artifacts", "hostPath": {"path": str(artifacts_dir.resolve())}},
+    ]
+
+    for dataset_cfg in exp.datasets.values():
+        if dataset_cfg.tokenizer_path is not None:
+            host_tok = Path(dataset_cfg.tokenizer_path).resolve()
+            container_tok = _abs_container_path(dataset_cfg.tokenizer_path)
+            volume_mounts.append(
+                {"name": "tokenizer", "mountPath": container_tok, "readOnly": True}
+            )
+            volumes.append({"name": "tokenizer", "hostPath": {"path": str(host_tok)}})
+            break
+
+    return {
+        "apiVersion": "batch/v1",
+        "kind": "Job",
+        "metadata": {"name": job_name, "namespace": namespace},
+        "spec": {
+            "backoffLimit": 0,
+            "template": {
+                "spec": {
+                    "restartPolicy": "Never",
+                    "containers": [
+                        {
+                            "name": "orchestrator",
+                            "image": image,
+                            "imagePullPolicy": "Never",
+                            "args": [
+                                "python",
+                                "-m",
+                                "framework.nodes.orchestrator.opt_runner",
+                                f"/app/experiments/{exp.name}",
+                            ],
+                            "env": [
+                                {
+                                    "name": "CALLBACK_HOST",
+                                    "valueFrom": {
+                                        "fieldRef": {"fieldPath": "status.podIP"}
+                                    },
+                                },
+                                {"name": "CALLBACK_PORT", "value": "8080"},
+                                {"name": "PYTHONUNBUFFERED", "value": "1"},
+                            ],
+                            "volumeMounts": volume_mounts,
+                        }
+                    ],
+                    "volumes": volumes,
+                }
+            },
         },
     }
 

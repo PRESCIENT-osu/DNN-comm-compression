@@ -1,0 +1,111 @@
+# Optimization experiment spec: ResNet56 + Llama-MMLU on a 3-node linear topology.
+#
+# Paired with a profile (e.g. profiles/linear-3-multi/100mbps.yaml) by
+# tools/generate.py --opt to produce a fully resolved experiment in
+# experiments/opt/<name>/.
+
+nodes:
+  - A
+  - B
+  - C
+
+pipelines:
+  - name: resnet-a
+    model: resnet
+    partitions:
+      A: [p1]
+      B: [p2, p3]
+      C: [p4, p5]
+    flow: [A, B, C]
+
+  - name: llama-mmlu-a
+    model: llama
+    partitions:
+      A: [p1]
+      B: [p2]
+      C: [p3]
+    flow: [A, B, C]
+
+datasets:
+  resnet:
+    name: cifar10
+    path: .datasets/cifar10
+    batch_size: 100
+    max_in_flight: 10
+    max_samples: 1000
+    seed: 42
+  llama:
+    name: mmlu
+    path: .datasets/mmlu
+    tokenizer_path: models/llama/.partitions/tokenizer
+    batch_size: 4
+    max_in_flight: 4
+    subjects:
+      - college_computer_science
+      - high_school_mathematics
+      - professional_law
+      - global_facts
+      - miscellaneous
+      - business_ethics
+    samples_per_subject: 20
+    seed: 42
+
+workload:
+  pattern: fill
+  window_per_pipeline: 4
+  mix:
+    resnet-a: 0.5
+    llama-mmlu-a: 0.5
+
+# Per-pipeline throughput targets (R_k) and WFQ compute share weights (s_comp).
+tasks:
+  resnet-a:
+    throughput_target: 5.0   # tasks/second
+    task_weight: 0.4         # proportional WFQ weight
+  llama-mmlu-a:
+    throughput_target: 0.2
+    task_weight: 0.6
+
+# Per-link optimization search space.  The optimizer selects η ∈ [eta_min, eta_max]
+# from the allowed_methods each slot.
+links:
+  - from: A
+    to: B
+    eta_min: 0.05
+    eta_max: 1.0
+    allowed_methods: [topk, llmint8]
+    llmint8_mapping:
+      resnet-a:
+        entries:
+          - feature_k_values: [0.85]
+            outlier_values: [0.01]
+          - feature_k_values: [0.70]
+            outlier_values: [0.05]
+          - feature_k_values: [0.50]
+            outlier_values: [0.10]
+      llama-mmlu-a:
+        entries:
+          - feature_k_values: [0.90]
+            outlier_values: [0.005]
+          - feature_k_values: [0.75]
+            outlier_values: [0.02]
+          - feature_k_values: [0.60]
+            outlier_values: [0.05]
+
+  - from: B
+    to: C
+    eta_min: 0.05
+    eta_max: 1.0
+    allowed_methods: [topk]
+
+# Slot loop hyperparameters shared across all optimization sub-experiments.
+optimization_loop:
+  n_slots: 100
+  batches_per_slot: 10
+  profiling_batches: 20
+  link_probe_interval_slots: 1
+  dual_step_size: 0.01
+
+metrics_server:
+  host: metrics
+  port: 9100

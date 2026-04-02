@@ -1,11 +1,14 @@
-# Orchestrator image.
-# No CUDA required — runs on CPU.  Needs torch for dataset batching and
-# tensor encode/decode, plus transformers/datasets for the Llama data client.
+# Orchestrator image — CUDA-enabled for Stein oracle evaluation.
+#
+# The optimizer adapter runs SimulatedResNetPipeline and SimulatedLlamaPipeline
+# locally during the slot loop to estimate ∇A_k(η) via the Stein gradient oracle.
+# Both pipelines load the full model and run forward passes, requiring a GPU.
+# Tested against NVIDIA L40s (CUDA 12.x).
 #
 # Build context: repo root
 #   docker build -f docker/Dockerfile.orchestrator -t dnn-orchestrator:latest .
 
-FROM python:3.11-slim
+FROM pytorch/pytorch:2.4.0-cuda12.1-cudnn9-runtime
 
 WORKDIR /app
 
@@ -15,10 +18,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY pyproject.toml .
 RUN pip install --no-cache-dir \
-    torch --index-url https://download.pytorch.org/whl/cpu
-RUN pip install --no-cache-dir \
-    torchvision --index-url https://download.pytorch.org/whl/cpu
-RUN pip install --no-cache-dir \
+    torchvision \
     fastapi \
     "uvicorn[standard]" \
     httpx \
@@ -26,10 +26,23 @@ RUN pip install --no-cache-dir \
     pydantic \
     transformers \
     datasets \
-    accelerate
+    accelerate \
+    scipy \
+    scikit-learn
 
+# Framework source
 COPY framework/ ./framework/
 
+# Model simulation modules (ResNet + Llama simulation pipelines and partition helpers)
+COPY models/__init__.py ./models/__init__.py
+COPY models/resnet/ ./models/resnet/
+COPY models/llama/ ./models/llama/
+
+# External optimizer library (only the src/ package to minimise image size)
+COPY external/Inference_Optimizer/src/ ./external/Inference_Optimizer/src/
+
+# HuggingFace model cache — mount a volume here to avoid re-downloading weights
+ENV HF_HOME=/hf_cache
 ENV PYTHONUNBUFFERED=1
 
 CMD ["python", "-m", "framework.nodes.orchestrator.runner"]

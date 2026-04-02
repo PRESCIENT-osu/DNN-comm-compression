@@ -1,0 +1,1121 @@
+"""Optimization experiment runner.
+
+Executes the ordered list of sub-experiments defined in a generated
+``experiments/opt/<name>/experiment.yaml``.  Sub-experiments run sequentially;
+each type shares infrastructure (data client, link prober, artifact store,
+metrics emitter) and builds on artifacts produced by earlier phases.
+
+Phase dispatch
+--------------
+- ``profiling``      — runs at η=1.0, measures nominal throughput and accuracy.
+- ``accuracy_model`` — fits or reloads a surrogate A_k(η) per pipeline.
+- ``no_csi``         — primal-dual slot loop, one run per μ in mu_sweep.
+- ``csi_aware``      — closed-form η* slot loop using channel capacity estimates.
+- ``random``         — uniform random η baseline slot loop.
+- ``fifo``           — η=1.0 baseline slot loop.
+
+CLI usage::
+
+    python -m framework.nodes.orchestrator.opt_runner \\
+        experiments/opt/resnet56_llama_mmlu_linear-3-multi_100mbps \\
+        --callback-host orchestrator \\
+        --callback-port 8080
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import logging
+import os
+import time
+import uuid
+from pathlib import Path
+from typing import Any
+
+import httpx
+import numpy as np  # noqa: F401
+
+from framework.datamodels.api import MultiConfigUpdate
+from framework.datamodels.events import (
+    OptSlotEvent,
+    TaskAccuracyEvent,
+    ThroughputConstraintEvent,
+)
+from framework.datamodels.experiment import CompressionMethod
+from framework.datamodels.opt_experiment import (
+    AccuracyModelSubExperiment,
+    ChannelEstimatorHistorySource,
+    CsiAwareSubExperiment,  # noqa: F401
+    DecoupledDescentSubExperiment,  # noqa: F401
+    EstimatedCsiSingleSubExperiment,  # noqa: F401
+    GeneratedOptExperimentConfig,
+    HistoricalAverageCESubExperiment,  # noqa: F401
+    MaxCompressionMultiSubExperiment,  # noqa: F401
+    MaxCompressionSingleSubExperiment,  # noqa: F401
+    NoCompressionMultiSubExperiment,  # noqa: F401
+    NoCompressionSingleSubExperiment,  # noqa: F401
+    NoCsiSubExperiment,
+    OptSubExperiment,
+    ProfilingSubExperiment,
+    ProportionalResourceSubExperiment,  # noqa: F401
+    QueueProportionalSubExperiment,  # noqa: F401
+    StaticEqualShareSubExperiment,  # noqa: F401
+    StrictPriorityGreedySubExperiment,  # noqa: F401
+    UniformCompressionSingleSubExperiment,  # noqa: F401
+)
+from framework.nodes.metrics.emitter import MetricsEmitter
+from framework.nodes.orchestrator.artifacts import ArtifactStore
+from framework.nodes.orchestrator.link_prober import LinkProber
+from framework.nodes.orchestrator.multi_controller import (
+    wait_for_multi_nodes_ready,
+)
+from framework.nodes.orchestrator.multi_runner import MultiDataClient
+from framework.optimizer.accuracy_model import AccuracyModel, build_accuracy_model
+from framework.optimizer.compression_mapper import CompressionMapper
+from framework.optimizer.inference_optimizer_adapter import (
+    BaseOptimizerAdapter,
+    build_adapter,
+    build_global_order,
+    build_inference_tasks,
+    probe_dict_to_c_t_vector,
+)
+from framework.utils.loader import load_opt_experiment_config
+
+logger = logging.getLogger(__name__)
+
+_CONFIG_DRAIN_TIMEOUT_S = 30.0
+_CONFIG_HTTP_TIMEOUT_S = _CONFIG_DRAIN_TIMEOUT_S + 5.0
+
+
+# ---------------------------------------------------------------------------
+# Config push
+# ---------------------------------------------------------------------------
+
+
+async def push_opt_slot_config(
+    eta_per_pipeline_per_link: dict[str, dict[str, float]],
+    exp: GeneratedOptExperimentConfig,
+    mapper: CompressionMapper,
+    node_host: str | None = None,
+    drain_timeout_s: float = _CONFIG_DRAIN_TIMEOUT_S,
+) -> None:
+    """Push per-pipeline compression config for a slot's η decisions to all nodes.
+
+    For each link, resolves which pipelines traverse it, maps η to a concrete
+    compression method via ``mapper``, and concurrently pushes outgoing config
+    to the sending node and incoming config to the receiving node.
+
+    Args:
+        eta_per_pipeline_per_link: Optimizer-selected η per pipeline per link
+            (keyed by pipeline_id → link_id → η).
+        exp: Generated experiment config (provides node host/port and pipeline
+            flow information).
+        mapper: Compression mapper for translating η to method + params.
+        node_host: Override hostname for all nodes (useful in Docker/k8s).
+        drain_timeout_s: How long each node waits for its queue to drain
+            before applying the new config.
+    """
+    node_map = {n.name: n for n in exp.nodes}
+
+    # Build link_id → [pipeline_ids that traverse this link].
+    link_pipelines: dict[str, list[str]] = {}
+    for link in exp.links:
+        traversing: list[str] = []
+        for pipeline in exp.pipelines:
+            flow = pipeline.flow
+            for i in range(len(flow) - 1):
+                if flow[i] == link.from_node and flow[i + 1] == link.to_node:
+                    traversing.append(pipeline.name)
+                    break
+        link_pipelines[link.link_id] = traversing
+
+    push_tasks: list[Any] = []
+    async with httpx.AsyncClient(timeout=_CONFIG_HTTP_TIMEOUT_S) as client:
+        for link in exp.links:
+            link_id = link.link_id
+            from_node = node_map[link.from_node]
+            to_node = node_map[link.to_node]
+
+            for pipeline_id in link_pipelines[link_id]:
+                eta = eta_per_pipeline_per_link.get(pipeline_id, {}).get(
+                    link_id, link.eta_max
+                )
+                decision = mapper.map(link_id, pipeline_id, eta)
+                try:
+                    method_enum = CompressionMethod(decision.method)
+                except ValueError:
+                    logger.warning(
+                        "Unknown compression method %r for link %s pipeline %s; "
+                        "falling back to topk",
+                        decision.method,
+                        link_id,
+                        pipeline_id,
+                    )
+                    method_enum = CompressionMethod.TOPK
+
+                outlier_prec = decision.params.get("outlier_precision", "fp16")
+                regular_prec = decision.params.get("regular_precision", "int8")
+
+                for node, direction in [
+                    (from_node, "outgoing"),
+                    (to_node, "incoming"),
+                ]:
+                    url = f"http://{node_host or node.host}:{node.port}/config"
+                    payload = MultiConfigUpdate(
+                        pipeline_id=pipeline_id,
+                        direction=direction,
+                        method=method_enum,
+                        rate=decision.effective_eta,
+                        drain_timeout_s=drain_timeout_s,
+                        outlier_precision=outlier_prec,
+                        regular_precision=regular_prec,
+                    )
+                    push_tasks.append(
+                        _push_one_config(client, url, payload, node.name, pipeline_id)
+                    )
+
+        await asyncio.gather(*push_tasks)
+
+
+async def _push_one_config(
+    client: httpx.AsyncClient,
+    url: str,
+    payload: MultiConfigUpdate,
+    node_name: str,
+    pipeline_id: str,
+) -> None:
+    """POST one MultiConfigUpdate to a node, raising on failure.
+
+    Args:
+        client: Shared httpx client.
+        url: Full /config URL.
+        payload: Config update payload.
+        node_name: Node name for log messages.
+        pipeline_id: Pipeline name for log messages.
+    """
+    try:
+        resp = await client.post(url, json=payload.model_dump())
+        resp.raise_for_status()
+        logger.debug(
+            "Config pushed: node=%s pipeline=%s %s method=%s rate=%.3f",
+            node_name,
+            pipeline_id,
+            payload.direction,
+            payload.method.value,
+            payload.rate,
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            f"Failed to push {payload.direction} config for pipeline "
+            f"'{pipeline_id}' to node '{node_name}' at {url}: {exc}"
+        ) from exc
+
+
+# ---------------------------------------------------------------------------
+# OptRunner
+# ---------------------------------------------------------------------------
+
+
+class OptRunner:
+    """Executes an optimization experiment's ordered sub-experiments.
+
+    Owns references to the data client, link prober, artifact store, and
+    metrics emitter.  Sub-experiments run sequentially and share these
+    resources.
+
+    Args:
+        exp: Generated optimization experiment config.
+        data_client: Multi-model data client (must be inside a session context).
+        link_prober: Orchestrator-side link prober.
+        artifact_store: Artifact storage for profiling and model artifacts.
+        emitter: Metrics emitter (already started).
+        metrics_url: Base URL of the metrics server.
+        node_host: Optional node hostname override.
+    """
+
+    def __init__(
+        self,
+        exp: GeneratedOptExperimentConfig,
+        data_client: MultiDataClient,
+        link_prober: LinkProber,
+        artifact_store: ArtifactStore,
+        emitter: MetricsEmitter,
+        metrics_url: str,
+        node_host: str | None = None,
+    ) -> None:
+        self._exp = exp
+        self._data_client = data_client
+        self._link_prober = link_prober
+        self._artifacts = artifact_store
+        self._emitter = emitter
+        self._metrics_url = metrics_url
+        self._node_host = node_host
+        self._mapper = CompressionMapper(exp.links)
+        self._pipeline_ids = [p.name for p in exp.pipelines]
+
+        # In-memory cache of loaded accuracy models (keyed by sub_exp.name).
+        self._accuracy_models: dict[str, dict[str, AccuracyModel]] = {}
+
+        # Profiling artifact cache: nominal bps per link at η=1.0.
+        self._nominal_bps_per_link: dict[str, float] = {}
+        self._tau_per_node: dict[str, dict[str, float]] = {}
+        self._a_per_link_bytes: dict[str, float] = {}
+
+    # ------------------------------------------------------------------
+    # Top-level orchestration
+    # ------------------------------------------------------------------
+
+    async def run(self) -> None:
+        """Execute all sub-experiments in definition order.
+
+        Sub-experiments are run sequentially.  An exception in any phase
+        propagates immediately and halts the run.
+        """
+        for sub_exp in self._exp.sub_experiments:
+            logger.info(
+                "=== Sub-experiment: %s (type=%s) ===", sub_exp.name, sub_exp.type
+            )
+            await self._run_sub_experiment(sub_exp)
+        logger.info("Optimization experiment '%s' complete", self._exp.name)
+
+    async def _run_sub_experiment(self, sub_exp: OptSubExperiment) -> None:
+        if isinstance(sub_exp, ProfilingSubExperiment):
+            await self._run_profiling(sub_exp)
+        elif isinstance(sub_exp, AccuracyModelSubExperiment):
+            await self._run_accuracy_model(sub_exp)
+        elif isinstance(sub_exp, NoCsiSubExperiment):
+            for mu in sub_exp.mu_sweep:
+                await self._run_opt_with_adapter(sub_exp, mu=mu)
+        else:
+            # All other optimization sub-experiments (baselines + CSI-aware)
+            await self._run_opt_with_adapter(sub_exp)
+
+    # ------------------------------------------------------------------
+    # Phase: profiling
+    # ------------------------------------------------------------------
+
+    async def _run_profiling(self, sub_exp: ProfilingSubExperiment) -> None:
+        """Run profiling at η=1.0 and store nominal-throughput artifacts.
+
+        Pushes no-compression config (η=eta_max) to all links, runs
+        ``profiling_batches`` inference rounds, probes all links, and
+        persists per-pipeline accuracy/latency + per-link nominal bps.
+
+        Args:
+            sub_exp: Profiling sub-experiment config.
+        """
+        artifact_path = self._artifacts.root / "profiling" / f"{sub_exp.name}.json"
+        config_hash = self._artifacts.config_hash(
+            {
+                "profiling_batches": self._exp.optimization_loop.profiling_batches,
+                "pipelines": [p.name for p in self._exp.pipelines],
+            }
+        )
+
+        if self._artifacts.is_valid(artifact_path, config_hash):
+            logger.info("[%s] Reusing cached profiling artifact", sub_exp.name)
+            data = self._artifacts.read_json(artifact_path)
+            self._nominal_bps_per_link = data.get("nominal_bps_per_link", {})
+            self._tau_per_node = data.get("tau_per_node_s", {})
+            self._a_per_link_bytes = data.get("a_per_link_bytes", {})
+            return
+
+        # Push η=eta_max (no compression) to all links.
+        pipeline_ids = [p.name for p in self._exp.pipelines]
+        eta_full = {
+            pid: {lk.link_id: lk.eta_max for lk in self._exp.links}
+            for pid in pipeline_ids
+        }
+        await push_opt_slot_config(
+            eta_full, self._exp, self._mapper, self._node_host, _CONFIG_DRAIN_TIMEOUT_S
+        )
+
+        run_id = f"{self._exp.name}_{sub_exp.name}"
+        slot_result = await self._data_client.run_slot(
+            n_batches=self._exp.optimization_loop.profiling_batches,
+            run_id=run_id,
+            node_host=self._node_host,
+            emitter=self._emitter,
+        )
+
+        # Probe links at η=1.0 to measure nominal channel capacity.
+        probe_results = await self._link_prober.probe_all(
+            slot_id=None,
+            experiment_id=self._exp.name,
+            run_id=run_id,
+        )
+        self._nominal_bps_per_link = probe_results
+
+        # Query per-node compute times and per-link activation sizes from
+        # the metrics server.  These are needed by InferenceTask construction
+        # in the external optimizer adapter.  Queried after the slot so that
+        # nodes have had time to emit and flush their events.
+        tau_per_node, a_per_link = await self._query_tau_and_a(
+            run_id=run_id,
+            experiment_id=self._exp.name,
+        )
+
+        per_pipeline: dict[str, Any] = {}
+        for pipeline in self._exp.pipelines:
+            pid = pipeline.name
+            lats = slot_result.per_pipeline_latency_ms.get(pid, [])
+            per_pipeline[pid] = {
+                "accuracy": slot_result.accuracy(pid),
+                "avg_latency_ms": sum(lats) / len(lats) if lats else 0.0,
+                "n_samples": len(lats),
+            }
+
+        artifact_data: dict[str, Any] = {
+            "per_pipeline": per_pipeline,
+            "nominal_bps_per_link": probe_results,
+            "tau_per_node_s": tau_per_node,
+            "a_per_link_bytes": a_per_link,
+        }
+        self._artifacts.write_json(artifact_path, artifact_data, config_hash)
+        self._tau_per_node: dict[str, dict[str, float]] = tau_per_node
+        self._a_per_link_bytes: dict[str, float] = a_per_link
+        logger.info(
+            "[%s] Profiling complete: pipelines=%s links=%s tau_nodes=%s a_links=%s",
+            sub_exp.name,
+            list(per_pipeline.keys()),
+            {k: f"{v / 1e6:.1f}Mbps" for k, v in probe_results.items()},
+            list(tau_per_node.keys()),
+            {k: f"{v / 1024:.1f}KB" for k, v in a_per_link.items()},
+        )
+
+    async def _query_tau_and_a(
+        self,
+        run_id: str,
+        experiment_id: str,
+    ) -> tuple[dict[str, dict[str, float]], dict[str, float]]:
+        """Query the metrics server for profiling timing and activation size data.
+
+        Fetches ``task_node_timing`` events (for per-node compute latency τ_i)
+        and ``send`` events (for per-link activation size a_i) emitted during
+        the profiling slot, then aggregates them.
+
+        Args:
+            run_id: Run identifier used to filter events to this slot.
+            experiment_id: Experiment identifier (used as ``experiment_name_contains``
+                filter so only this experiment's events are scanned).
+
+        Returns:
+            Tuple of:
+              - ``tau_per_node_s``: ``{pipeline_id: {node_id: mean_compute_s}}``
+              - ``a_per_link_bytes``: ``{link_id: mean_payload_bytes}``
+        """
+        tau_per_node: dict[str, dict[str, float]] = {}
+        a_per_link: dict[str, float] = {}
+
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                # --- tau: per-node compute latency ---
+                resp = await client.get(
+                    f"{self._metrics_url}/metrics/query",
+                    params={
+                        "event_type": "task_node_timing",
+                        "run_id": run_id,
+                        "experiment_name_contains": experiment_id,
+                        "limit": "10000",
+                    },
+                )
+                resp.raise_for_status()
+                timing_events: list[dict[str, Any]] = resp.json().get("events", [])
+
+                # Accumulate compute durations per (pipeline_id, node_id).
+                from collections import defaultdict  # noqa: PLC0415
+
+                sums: dict[tuple[str, str], float] = defaultdict(float)
+                counts: dict[tuple[str, str], int] = defaultdict(int)
+                for ev in timing_events:
+                    pid = ev.get("pipeline_id")
+                    nid = ev.get("node_id")
+                    cs = ev.get("compute_start")
+                    ce = ev.get("compute_end")
+                    if pid and nid and cs is not None and ce is not None:
+                        sums[(pid, nid)] += float(ce) - float(cs)
+                        counts[(pid, nid)] += 1
+
+                for (pid, nid), total in sums.items():
+                    tau_per_node.setdefault(pid, {})[nid] = total / counts[(pid, nid)]
+
+                # --- a_i: per-link mean payload bytes ---
+                resp = await client.get(
+                    f"{self._metrics_url}/metrics/query",
+                    params={
+                        "event_type": "send",
+                        "run_id": run_id,
+                        "experiment_name_contains": experiment_id,
+                        "limit": "10000",
+                    },
+                )
+                resp.raise_for_status()
+                send_events: list[dict[str, Any]] = resp.json().get("events", [])
+
+                byte_sums: dict[str, float] = defaultdict(float)
+                byte_counts: dict[str, int] = defaultdict(int)
+                for ev in send_events:
+                    fn = ev.get("from_node")
+                    tn = ev.get("to_node")
+                    pb = ev.get("payload_bytes")
+                    if fn and tn and pb is not None:
+                        link_id = f"{fn}-{tn}"
+                        byte_sums[link_id] += float(pb)
+                        byte_counts[link_id] += 1
+
+                for link_id, total in byte_sums.items():
+                    a_per_link[link_id] = total / byte_counts[link_id]
+
+        except Exception as exc:
+            logger.warning(
+                "Could not query tau/a_i from metrics server (run_id=%s): %s",
+                run_id,
+                exc,
+            )
+
+        return tau_per_node, a_per_link
+
+    # ------------------------------------------------------------------
+    # Phase: accuracy model
+    # ------------------------------------------------------------------
+
+    async def _run_accuracy_model(self, sub_exp: AccuracyModelSubExperiment) -> None:
+        """Train or reload the accuracy surrogate model A_k(η) for one pipeline.
+
+        For the surrogate backend:
+          1. Check the metrics server for existing (η, accuracy) records.
+          2. If fewer than min_samples found, run a targeted sweep at sweep_rates.
+          3. Fit the model and write to the artifact store.
+
+        The artifact is reused across restarts if its config hash matches.
+
+        Args:
+            sub_exp: Accuracy model sub-experiment config.
+        """
+        artifact_path = self._artifacts.accuracy_model_path(
+            sub_exp.pipeline_id, sub_exp.name
+        )
+        config_hash = self._artifacts.config_hash(
+            {
+                "pipeline_id": sub_exp.pipeline_id,
+                "model_type": sub_exp.model_type,
+                "sweep_rates": sub_exp.sweep_rates,
+            }
+        )
+
+        if self._artifacts.is_valid(artifact_path, config_hash):
+            logger.info("[%s] Reusing cached accuracy model artifact", sub_exp.name)
+            self._load_accuracy_model_from_artifact(sub_exp)
+            return
+
+        samples: list[tuple[float, float]] = []
+
+        if sub_exp.history_source == ChannelEstimatorHistorySource.METRICS_SERVER:
+            samples = await self._query_accuracy_samples(
+                sub_exp.pipeline_id,
+                experiment_name_contains=self._exp.name,
+            )
+            logger.info(
+                "[%s] Found %d existing accuracy records from metrics server",
+                sub_exp.name,
+                len(samples),
+            )
+
+        if len(samples) < sub_exp.min_samples:
+            logger.info(
+                "[%s] Insufficient samples (%d < %d); running accuracy sweep",
+                sub_exp.name,
+                len(samples),
+                sub_exp.min_samples,
+            )
+            sweep_samples = await self._run_accuracy_sweep(sub_exp)
+            samples.extend(sweep_samples)
+
+        if not samples:
+            logger.warning(
+                "[%s] No accuracy samples collected; accuracy model unavailable",
+                sub_exp.name,
+            )
+            return
+
+        model = build_accuracy_model(sub_exp.model_type)
+        model.fit(samples)
+
+        from framework.optimizer.accuracy_model import (
+            SurrogateAccuracyModel,  # noqa: PLC0415
+        )
+
+        model_dict: dict[str, Any] = {
+            "model_type": sub_exp.model_type,
+            "pipeline_id": sub_exp.pipeline_id,
+        }
+        if isinstance(model, SurrogateAccuracyModel):
+            model_dict.update(model.to_dict())
+
+        self._artifacts.write_json(artifact_path, model_dict, config_hash)
+        logger.info(
+            "[%s] Accuracy model fitted: pipeline=%s samples=%d",
+            sub_exp.name,
+            sub_exp.pipeline_id,
+            len(samples),
+        )
+
+        # Cache in-memory.
+        self._accuracy_models.setdefault(sub_exp.name, {})[sub_exp.pipeline_id] = model
+
+    async def _query_accuracy_samples(
+        self,
+        pipeline_id: str,
+        experiment_name_contains: str | None = None,
+        limit: int = 1000,
+    ) -> list[tuple[float, float]]:
+        """Query the metrics server for existing (η, accuracy) records.
+
+        Args:
+            pipeline_id: Pipeline to filter on.
+            experiment_name_contains: Optional substring filter for experiment names.
+            limit: Maximum records to fetch.
+
+        Returns:
+            List of (compression_rate, accuracy) tuples.
+        """
+        params: dict[str, str] = {
+            "event_type": "task_accuracy",
+            "pipeline_id": pipeline_id,
+            "limit": str(limit),
+        }
+        if experiment_name_contains:
+            params["experiment_name_contains"] = experiment_name_contains
+
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.get(
+                    f"{self._metrics_url}/metrics/query", params=params
+                )
+                resp.raise_for_status()
+                data = resp.json()
+        except Exception as exc:
+            logger.warning(
+                "Could not query accuracy records for pipeline '%s': %s",
+                pipeline_id,
+                exc,
+            )
+            return []
+
+        samples: list[tuple[float, float]] = []
+        for event in data.get("events", []):
+            rate = event.get("compression_rate")
+            acc = event.get("accuracy")
+            if rate is not None and acc is not None:
+                samples.append((float(rate), float(acc)))
+        return samples
+
+    async def _run_accuracy_sweep(
+        self,
+        sub_exp: AccuracyModelSubExperiment,
+    ) -> list[tuple[float, float]]:
+        """Run a targeted inference sweep at each rate in sweep_rates.
+
+        For each η value, pushes config to all links for the target pipeline,
+        runs one slot of inference, and records the observed accuracy.
+
+        Args:
+            sub_exp: Accuracy model sub-experiment config.
+
+        Returns:
+            List of (η, accuracy) tuples from the sweep.
+        """
+        samples: list[tuple[float, float]] = []
+        loop_cfg = self._exp.optimization_loop
+
+        for eta in sub_exp.sweep_rates:
+            pipeline_ids = [p.name for p in self._exp.pipelines]
+            eta_uniform = {
+                pid: {lk.link_id: eta for lk in self._exp.links} for pid in pipeline_ids
+            }
+            await push_opt_slot_config(
+                eta_uniform,
+                self._exp,
+                self._mapper,
+                self._node_host,
+                _CONFIG_DRAIN_TIMEOUT_S,
+            )
+
+            run_id = f"{self._exp.name}_{sub_exp.name}_sweep_eta{eta:.2f}"
+            slot_result = await self._data_client.run_slot(
+                n_batches=loop_cfg.batches_per_slot,
+                run_id=run_id,
+                node_host=self._node_host,
+                emitter=self._emitter,
+            )
+
+            acc = slot_result.accuracy(sub_exp.pipeline_id)
+            samples.append((eta, acc))
+
+            # Emit TaskAccuracyEvent so future runs can reuse these records.
+            self._emitter.emit(
+                TaskAccuracyEvent(
+                    experiment_id=self._exp.name,
+                    run_id=run_id,
+                    pipeline_id=sub_exp.pipeline_id,
+                    task_id=f"{run_id}_agg",
+                    compression_method="topk",
+                    compression_rate=eta,
+                    accuracy=acc,
+                    n_samples=len(
+                        slot_result.per_pipeline_latency_ms.get(sub_exp.pipeline_id, [])
+                    ),
+                )
+            )
+            logger.debug("[%s] Sweep η=%.2f → accuracy=%.4f", sub_exp.name, eta, acc)
+
+        return samples
+
+    def _load_accuracy_model_from_artifact(
+        self, sub_exp: AccuracyModelSubExperiment
+    ) -> None:
+        """Restore an accuracy model from its artifact file into the in-memory cache.
+
+        Args:
+            sub_exp: Accuracy model sub-experiment config.
+        """
+        from framework.optimizer.accuracy_model import (
+            SurrogateAccuracyModel,  # noqa: PLC0415
+        )
+
+        artifact_path = self._artifacts.accuracy_model_path(
+            sub_exp.pipeline_id, sub_exp.name
+        )
+        try:
+            data = self._artifacts.read_json(artifact_path)
+        except Exception as exc:
+            logger.warning(
+                "[%s] Could not load accuracy model artifact: %s", sub_exp.name, exc
+            )
+            return
+
+        model_type = data.get("model_type", "poly3")
+        if model_type.startswith("poly"):
+            model = SurrogateAccuracyModel.from_dict(data)
+        else:
+            model = build_accuracy_model(model_type)
+
+        self._accuracy_models.setdefault(sub_exp.name, {})[sub_exp.pipeline_id] = model
+
+    def _resolve_accuracy_models(
+        self, accuracy_model_ref: str
+    ) -> dict[str, AccuracyModel]:
+        """Look up accuracy models by sub-experiment reference name.
+
+        Falls back to a ConstantAccuracyModel(1.0) for any pipeline not covered.
+
+        Args:
+            accuracy_model_ref: Name of the AccuracyModelSubExperiment to use.
+
+        Returns:
+            Dict of pipeline_id → AccuracyModel.
+        """
+        from framework.optimizer.accuracy_model import (
+            ConstantAccuracyModel,  # noqa: PLC0415
+        )
+
+        cached = self._accuracy_models.get(accuracy_model_ref, {})
+        return {
+            pid: cached.get(pid, ConstantAccuracyModel()) for pid in self._pipeline_ids
+        }
+
+    # ------------------------------------------------------------------
+    # Phase: adapter-based optimizer (all opt sub-experiments)
+    # ------------------------------------------------------------------
+
+    async def _run_opt_with_adapter(
+        self,
+        sub_exp: OptSubExperiment,
+        mu: float | None = None,
+    ) -> None:
+        """Run a slot loop using the external optimizer adapter interface.
+
+        Builds InferenceTask objects from profiling artifacts, constructs the
+        appropriate BaseOptimizerAdapter via build_adapter, then delegates to
+        _run_slot_loop_adapter.
+
+        Args:
+            sub_exp: Sub-experiment config (any optimization sub-experiment type).
+            mu: Override mu for NoCsiSubExperiment runs (one call per mu value).
+        """
+        global_order = build_global_order(self._exp)
+        inference_tasks, task_id_to_pipeline, pipeline_to_task_id = (
+            build_inference_tasks(
+                exp=self._exp,
+                tau_per_node=self._tau_per_node,
+                a_per_link_bytes=self._a_per_link_bytes,
+                global_order=global_order,
+                simulations=None,  # no simulations for now (stein_simulated is Phase 5+)
+                stein_cfg=None,
+            )
+        )
+
+        adapter = build_adapter(
+            sub_exp=sub_exp,
+            inference_tasks=inference_tasks,
+            task_id_to_pipeline=task_id_to_pipeline,
+            pipeline_to_task_id=pipeline_to_task_id,
+            global_order=global_order,
+            exp=self._exp,
+            mu=mu,
+        )
+
+        # Build a descriptive run name.
+        if mu is not None:
+            run_name = f"{sub_exp.name}_mu{mu}"
+        else:
+            run_name = sub_exp.name
+
+        run_id = f"{self._exp.name}_{run_name}_{uuid.uuid4().hex[:6]}"
+        logger.info("[%s] Starting optimization run via adapter", run_name)
+
+        await self._run_slot_loop_adapter(
+            adapter=adapter,
+            sub_exp_name=run_name,
+            run_id=run_id,
+            global_order=global_order,
+            task_id_to_pipeline=task_id_to_pipeline,
+            pipeline_to_task_id=pipeline_to_task_id,
+            inference_tasks=inference_tasks,
+        )
+
+    # ------------------------------------------------------------------
+    # Shared slot loop (adapter-based)
+    # ------------------------------------------------------------------
+
+    async def _run_slot_loop_adapter(
+        self,
+        adapter: BaseOptimizerAdapter,
+        sub_exp_name: str,
+        run_id: str,
+        global_order: list[str],
+        task_id_to_pipeline: dict[int, str],
+        pipeline_to_task_id: dict[str, int],
+        inference_tasks: Any,
+    ) -> None:
+        """Execute the optimization slot loop using a BaseOptimizerAdapter.
+
+        Each slot:
+          1. Probe links (every link_probe_interval_slots slots).
+          2. Build c_t vector from probe results.
+          3. Call adapter.step(t, c_t) to get eta_per_pipeline_per_link.
+          4. Call adapter.observe_capacity(c_t) to update estimator state.
+          5. Push compression config to nodes.
+          6. Submit batches_per_slot tasks and collect SlotResult.
+          7. Emit OptSlotEvent, ThroughputConstraintEvent, TaskAccuracyEvent.
+          8. Call adapter.update_dual(t, actual_delays).
+
+        Args:
+            adapter: Instantiated adapter for this run.
+            sub_exp_name: Human-readable name for logs and metric events.
+            run_id: Run identifier for metric events.
+            global_order: Ordered list of all node names.
+            task_id_to_pipeline: task_id -> pipeline_id mapping.
+            pipeline_to_task_id: pipeline_id -> task_id mapping.
+            inference_tasks: List of InferenceTask objects (for task_id indexing).
+        """
+        loop_cfg = self._exp.optimization_loop
+        tasks_cfg = self._exp.tasks
+        pipeline_ids = self._pipeline_ids
+
+        cumulative_violations: dict[str, int] = {pid: 0 for pid in pipeline_ids}
+
+        for slot_id in range(loop_cfg.n_slots):
+            # --- 1. Link probe ---
+            probe_bps: dict[str, float] = {}
+            if slot_id % loop_cfg.link_probe_interval_slots == 0:
+                probe_bps = await self._link_prober.probe_all(
+                    slot_id=slot_id,
+                    experiment_id=self._exp.name,
+                    run_id=run_id,
+                )
+            else:
+                probe_bps = self._link_prober.latest_estimates()
+
+            # --- 2. Build c_t vector ---
+            c_t = probe_dict_to_c_t_vector(probe_bps, global_order)
+
+            # --- 3. Optimizer step ---
+            t_solve_start = time.perf_counter()
+            eta_per_pipeline_per_link, infeasible = adapter.step(slot_id, c_t)
+            solve_time_ms = (time.perf_counter() - t_solve_start) * 1000.0
+
+            # --- 4. Update estimator ---
+            adapter.observe_capacity(c_t)
+
+            # --- 5. Push config ---
+            await push_opt_slot_config(
+                eta_per_pipeline_per_link,
+                self._exp,
+                self._mapper,
+                self._node_host,
+                _CONFIG_DRAIN_TIMEOUT_S,
+            )
+
+            # --- 6. Run slot ---
+            slot_run_id = f"{run_id}_s{slot_id}"
+            slot_result = await self._data_client.run_slot(
+                n_batches=loop_cfg.batches_per_slot,
+                run_id=slot_run_id,
+                node_host=self._node_host,
+                emitter=self._emitter,
+            )
+
+            # --- 7. Emit events ---
+            achieved_rps: dict[str, float] = {}
+            d_excess: dict[str, float] = {}
+            actual_delays: dict[int, float] = {}
+
+            for pid in pipeline_ids:
+                task_cfg = tasks_cfg.get(pid)
+                target_rps = task_cfg.throughput_target if task_cfg else 0.0
+                rps = slot_result.achieved_rps(pid)
+                achieved_rps[pid] = rps
+                excess = max(0.0, target_rps - rps)
+                d_excess[pid] = excess
+                satisfied = rps >= target_rps
+                if not satisfied:
+                    cumulative_violations[pid] += 1
+
+                # Actual delay approximation: 1/achieved_rps (seconds per inference).
+                task_id = pipeline_to_task_id.get(pid)
+                if task_id is not None and rps > 0:
+                    actual_delays[task_id] = 1.0 / rps
+
+                self._emitter.emit(
+                    ThroughputConstraintEvent(
+                        experiment_id=self._exp.name,
+                        run_id=run_id,
+                        slot_id=slot_id,
+                        pipeline_id=pid,
+                        task_id=slot_run_id,
+                        target_rps=target_rps,
+                        achieved_rps=rps,
+                        satisfied=satisfied,
+                        violation_magnitude=excess,
+                        cumulative_violations=cumulative_violations[pid],
+                        sub_experiment_name=sub_exp_name,
+                    )
+                )
+
+                acc = slot_result.accuracy(pid)
+                # Use first link's η for this pipeline as representative compression rate.
+                first_link = self._exp.links[0] if self._exp.links else None
+                comp_rate = (
+                    eta_per_pipeline_per_link.get(pid, {}).get(first_link.link_id, 1.0)
+                    if first_link
+                    else 1.0
+                )
+                self._emitter.emit(
+                    TaskAccuracyEvent(
+                        experiment_id=self._exp.name,
+                        run_id=run_id,
+                        pipeline_id=pid,
+                        task_id=slot_run_id,
+                        compression_method="adapter",
+                        compression_rate=comp_rate,
+                        accuracy=acc,
+                        n_samples=len(slot_result.per_pipeline_latency_ms.get(pid, [])),
+                        slot_id=slot_id,
+                    )
+                )
+
+            self._emitter.emit(
+                OptSlotEvent(
+                    experiment_id=self._exp.name,
+                    run_id=run_id,
+                    slot_id=slot_id,
+                    eta_per_pipeline_per_link=eta_per_pipeline_per_link,
+                    lambda_per_task={},
+                    d_excess_per_task=d_excess,
+                    c_hat_per_link=probe_bps,
+                    optimizer_type=sub_exp_name,
+                    solve_time_ms=solve_time_ms,
+                    sub_experiment_name=sub_exp_name,
+                    infeasible=infeasible,
+                )
+            )
+
+            # --- 8. Dual update ---
+            adapter.update_dual(slot_id, actual_delays)
+
+            if slot_id % 10 == 0:
+                logger.info(
+                    "[%s] slot=%d  rps=%s  infeasible=%s",
+                    sub_exp_name,
+                    slot_id,
+                    {k: f"{v:.2f}" for k, v in achieved_rps.items()},
+                    infeasible,
+                )
+
+
+# ---------------------------------------------------------------------------
+# Top-level entry point
+# ---------------------------------------------------------------------------
+
+
+async def run_opt_experiment(
+    experiment_dir: Path,
+    callback_host: str,
+    callback_port: int,
+    result_timeout_s: float,
+    dry_run: bool,
+    node_host: str | None = None,
+    metrics_host: str | None = None,
+) -> None:
+    """Load and execute a full optimization experiment.
+
+    Instantiates all shared infrastructure (data client, link prober, artifact
+    store, metrics emitter) and delegates to ``OptRunner.run()``.
+
+    Args:
+        experiment_dir: Directory containing the generated experiment.yaml.
+        callback_host: Hostname pipeline nodes use to reach the result callback.
+        callback_port: Port for the orchestrator's callback server.
+        result_timeout_s: Per-task result wait timeout in seconds.
+        dry_run: If True, log the plan without executing.
+        node_host: Override hostname used to reach all nodes.
+        metrics_host: Override hostname for the metrics server.
+    """
+    exp_yaml = experiment_dir / "experiment.yaml"
+    exp = load_opt_experiment_config(exp_yaml)
+
+    logger.info(
+        "Optimization experiment: %s  pipelines=%d  sub-experiments=%d",
+        exp.name,
+        len(exp.pipelines),
+        len(exp.sub_experiments),
+    )
+
+    if dry_run:
+        for sub_exp in exp.sub_experiments:
+            logger.info("  [%s] type=%s", sub_exp.name, sub_exp.type)
+        logger.info("Dry run — skipping execution")
+        return
+
+    resolved_metrics_host = metrics_host or exp.metrics_server.host
+    metrics_url = f"http://{resolved_metrics_host}:{exp.metrics_server.port}"
+
+    emitter = MetricsEmitter(server_url=metrics_url)
+    await emitter.start()
+
+    await wait_for_multi_nodes_ready(exp, node_host=node_host)
+
+    artifact_store = ArtifactStore(exp.artifacts_dir)
+
+    # Build estimators for the link prober (uses a neutral moving average
+    # just for the prober's own emission; optimizers build their own).
+    from framework.datamodels.opt_experiment import (  # noqa: PLC0415
+        ChannelEstimatorConfig,
+        ChannelEstimatorHistorySource,
+        ChannelEstimatorType,
+    )
+    from framework.optimizer.channel_estimators import build_estimator  # noqa: PLC0415
+
+    prober_est_cfg = ChannelEstimatorConfig(
+        type=ChannelEstimatorType.MOVING_AVG,
+        window_size=10,
+        history_source=ChannelEstimatorHistorySource.NONE,
+        warmup_value_bps=1.0e8,
+    )
+    prober_estimators = {
+        lk.link_id: build_estimator(prober_est_cfg) for lk in exp.links
+    }
+
+    link_prober = LinkProber(
+        links=exp.links,
+        nodes=exp.nodes,
+        estimators=prober_estimators,
+        emitter=emitter,
+    )
+
+    data_client = MultiDataClient(
+        exp=exp,
+        callback_host=callback_host,
+        callback_port=callback_port,
+        result_timeout_s=result_timeout_s,
+    )
+
+    async with data_client.session():
+        runner = OptRunner(
+            exp=exp,
+            data_client=data_client,
+            link_prober=link_prober,
+            artifact_store=artifact_store,
+            emitter=emitter,
+            metrics_url=metrics_url,
+            node_host=node_host,
+        )
+        await runner.run()
+
+    await emitter.stop()
+    logger.info("Optimization experiment '%s' finished", exp.name)
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+
+def main() -> None:
+    """CLI entry point for the optimization experiment runner."""
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s"
+    )
+    parser = argparse.ArgumentParser(
+        description="Run a DNN compression optimization experiment."
+    )
+    parser.add_argument(
+        "experiment_dir",
+        type=Path,
+        help="Path to the generated experiment directory (containing experiment.yaml)",
+    )
+    parser.add_argument(
+        "--callback-host",
+        default=os.getenv("CALLBACK_HOST", "localhost"),
+    )
+    parser.add_argument(
+        "--callback-port",
+        type=int,
+        default=int(os.getenv("CALLBACK_PORT", "8080")),
+    )
+    parser.add_argument(
+        "--result-timeout",
+        type=float,
+        default=300.0,
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--node-host",
+        default=os.getenv("NODE_HOST"),
+    )
+    parser.add_argument(
+        "--metrics-host",
+        default=os.getenv("METRICS_HOST"),
+    )
+    args = parser.parse_args()
+
+    asyncio.run(
+        run_opt_experiment(
+            experiment_dir=args.experiment_dir,
+            callback_host=args.callback_host,
+            callback_port=args.callback_port,
+            result_timeout_s=args.result_timeout,
+            dry_run=args.dry_run,
+            node_host=args.node_host,
+            metrics_host=args.metrics_host,
+        )
+    )
+
+
+if __name__ == "__main__":
+    main()
