@@ -641,6 +641,25 @@ The validator detects multi-model experiments by the presence of the `pipelines`
 
 ---
 
+## Optimizer Experiments
+
+Optimizer experiments build directly on the multi-model infrastructure. The same physical nodes and Docker images (`dnn-compute-multi`) are reused. The key difference is that instead of a fixed compression grid, the orchestrator runs an adaptive slot loop that queries the external `Inference_Optimizer` library at each step.
+
+Optimizer specs live in `optspecs/` (not `multispecs/`). Generate and run them with:
+
+```bash
+python tools/generate.py --opt \
+    --spec optspecs/resnet56_llama_mmlu \
+    --profile profiles/linear-3-multi/100mbps.yaml
+
+python -m framework.nodes.orchestrator.opt_runner \
+    experiments/opt/resnet56_llama_mmlu_linear-3-multi_100mbps
+```
+
+See [docs/optimizer.md](optimizer.md) for the full optspec format, sub-experiment type reference, and implementation details.
+
+---
+
 ## Python API
 
 ```python

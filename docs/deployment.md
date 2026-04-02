@@ -10,18 +10,20 @@ The framework uses four separate images — one per deployment role — to avoid
 |-------|-----------|------|---------|
 | `dnn-compute-resnet` | `docker/Dockerfile.compute-resnet` | `pytorch/pytorch:2.4.0-cuda12.1-cudnn9-runtime` | ResNet pipeline nodes |
 | `dnn-compute-llama` | `docker/Dockerfile.compute-llama` | `pytorch/pytorch:2.4.0-cuda12.1-cudnn9-runtime` | Llama pipeline nodes |
+| `dnn-compute-multi` | `docker/Dockerfile.compute-multi` | `pytorch/pytorch:2.4.0-cuda12.1-cudnn9-runtime` | Multi-pipeline nodes (FIFO queue, ResNet + Llama) |
 | `dnn-metrics` | `docker/Dockerfile.metrics` | `python:3.11-slim` | Metrics ingestion server |
-| `dnn-orchestrator` | `docker/Dockerfile.orchestrator` | `python:3.11-slim` | Experiment orchestrator (CPU only) |
+| `dnn-orchestrator` | `docker/Dockerfile.orchestrator` | `pytorch/pytorch:2.4.0-cuda12.1-cudnn9-runtime` | Experiment orchestrator (CUDA — Stein oracle needs GPU) |
 
 ### Building images
 
 ```bash
-# All four images at once
+# All images at once
 make build
 
 # Individual images
 make build-resnet
 make build-llama
+make build-multi
 make build-metrics
 make build-orchestrator
 
@@ -35,9 +37,16 @@ All `make build-*` targets use the repo root as the Docker build context. The eq
 ```bash
 docker build -f docker/Dockerfile.compute-resnet -t dnn-compute-resnet:latest .
 docker build -f docker/Dockerfile.compute-llama  -t dnn-compute-llama:latest  .
+docker build -f docker/Dockerfile.compute-multi  -t dnn-compute-multi:latest  .
 docker build -f docker/Dockerfile.metrics        -t dnn-metrics:latest        .
 docker build -f docker/Dockerfile.orchestrator   -t dnn-orchestrator:latest   .
 ```
+
+### Orchestrator CUDA requirement
+
+The orchestrator image is based on the CUDA PyTorch runtime (same base as the compute nodes). This is required because optimizer sub-experiments (see [docs/optimizer.md](optimizer.md)) run the Stein gradient oracle locally — evaluating full ResNet and Llama simulation pipelines on GPU to estimate ∇A_k(η). Sweep-only experiments (no optimizer sub-experiments) do not use the GPU, but the same image is used regardless to avoid maintaining two orchestrator images.
+
+Mount an HuggingFace model cache at `/hf_cache` inside the orchestrator container to avoid re-downloading Llama weights on each run.
 
 ### Traffic shaping
 
