@@ -73,7 +73,7 @@ links:
     to: B
     eta_min: 0.05
     eta_max: 1.0
-    allowed_methods: [topk]
+    allowed_methods: [topk, llmint8]
     llmint8_mapping:
       resnet-a:
         entries:

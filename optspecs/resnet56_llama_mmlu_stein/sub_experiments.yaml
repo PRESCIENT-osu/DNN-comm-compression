@@ -1,0 +1,120 @@
+sub_experiments:
+
+    # Phase 1: unchanged
+    - name: profiling
+      type: profiling
+
+    # Phase 2: stein_simulated — no polynomial fitting, just load the simulation
+    # pipeline on GPU so the oracle callable is ready for Phase 3.
+    # partition_paths points to the pre-built partition artifacts directory.
+    - name: accuracy_model_resnet
+      type: accuracy_model
+      pipeline_id: resnet-a
+      backend: stein_simulated
+      partition_paths: models/resnet/.partitions
+      n_samples: 50        # how many (η, acc) pairs to sample for any offline checks
+      sigma: 0.05          # perturbation scale for Stein oracle
+
+    - name: accuracy_model_llama
+      type: accuracy_model
+      pipeline_id: llama-mmlu-a
+      backend: stein_simulated
+      partition_paths: models/llama/.partitions
+      n_samples: 30
+      sigma: 0.05
+
+    # Phase 3: no_csi — accuracy_model_ref is gone; stein_config wires the oracle
+    - name: no_csi_mu_sweep
+      type: no_csi
+      mu_sweep: [0.5, 1.0, 3.0, 10.0]
+      # accuracy_model_ref is removed — the Stein oracle is used directly
+      stein_config:
+        sigma: 0.05          # η perturbation scale: evaluates A_k(η ± σz)
+        N: 50                # antithetic sample pairs per gradient call (2×50 = 100 fwd passes)
+        n_fast_samples: 512  # ResNet: random subset size for the fast accuracy path
+      channel_estimator:
+        type: moving_average
+        window_size: 10
+        history_source: metrics_server
+        warmup_value_bps: 1.0e8
+
+    # Phase 4: unchanged — csi_aware never calls A_k
+    - name: csi_aware
+      type: csi_aware
+      channel_estimator:
+        type: lcb
+        window_size: 20
+        z: 1.5
+        history_source: metrics_server
+        warmup_value_bps: 1.0e8
+
+    # Phases 5–6: all baselines unchanged — none call A_k(η)
+    - name: max_compression_single
+      type: max_compression_single
+
+    - name: no_compression_single
+      type: no_compression_single
+
+    - name: uniform_compression_single
+      type: uniform_compression_single
+      channel_estimator:
+        type: moving_average
+        window_size: 10
+        warmup_value_bps: 1.0e8
+
+    - name: myopic_single
+      type: estimated_csi_single
+      channel_estimator:
+        type: last_observation
+        warmup_value_bps: 1.0e8
+
+    - name: max_compression_multi
+      type: max_compression_multi
+
+    - name: no_compression_multi
+      type: no_compression_multi
+
+    - name: static_equal_share
+      type: static_equal_share
+      channel_estimator:
+        type: moving_average
+        window_size: 10
+        warmup_value_bps: 1.0e8
+
+    - name: proportional_resource
+      type: proportional_resource
+      channel_estimator:
+        type: moving_average
+        window_size: 10
+        warmup_value_bps: 1.0e8
+
+    - name: strict_priority_greedy
+      type: strict_priority_greedy
+      channel_estimator:
+        type: moving_average
+        window_size: 10
+        warmup_value_bps: 1.0e8
+
+    - name: decoupled_descent
+      type: decoupled_descent
+      mu: 1.0
+      epsilon: 0.1
+      channel_estimator:
+        type: moving_average
+        window_size: 10
+        warmup_value_bps: 1.0e8
+
+    - name: queue_proportional
+      type: queue_proportional
+      mu: 1.0
+      epsilon: 0.1
+      channel_estimator:
+        type: moving_average
+        window_size: 10
+        warmup_value_bps: 1.0e8
+
+    - name: historical_average_ce
+      type: historical_average_ce
+      channel_estimator:
+        type: mean
+        warmup_value_bps: 1.0e8
