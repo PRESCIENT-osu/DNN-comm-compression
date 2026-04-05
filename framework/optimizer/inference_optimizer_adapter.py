@@ -827,7 +827,7 @@ def build_adapter(
     # ------------------------------------------------------------------
     if isinstance(sub_exp, NoCsiSubExperiment):
         actual_mu = mu if mu is not None else 1.0
-        epsilon = float(exp.optimization_loop.dual_step_size)
+        epsilon = float(exp.optimization_loop.epsilon)
         num_links = M - 1
         estimator = _build_external_estimator(sub_exp.channel_estimator, num_links)
         if K == 1:

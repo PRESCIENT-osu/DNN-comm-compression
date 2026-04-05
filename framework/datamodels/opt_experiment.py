@@ -140,14 +140,15 @@ class OptimizationLoopConfig(BaseModel):
         batches_per_slot: Inference batches submitted per slot.
         profiling_batches: Batches used during the profiling phase (η=1.0).
         link_probe_interval_slots: Probe links every N slots.
-        dual_step_size: Step size for the Lagrangian dual update (No-CSI only).
+        epsilon: Floor and initial value for the Lagrangian dual variable λ (No-CSI only).
+            Prevents λ from reaching zero, ensuring the delay penalty remains active.
     """
 
     n_slots: int = 100
     batches_per_slot: int = 10
     profiling_batches: int = 20
     link_probe_interval_slots: int = 1
-    dual_step_size: float = 0.01
+    epsilon: float = 0.01
 
 
 # ---------------------------------------------------------------------------

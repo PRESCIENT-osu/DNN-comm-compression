@@ -104,7 +104,7 @@ optimization_loop:
   batches_per_slot: 10
   profiling_batches: 20
   link_probe_interval_slots: 1
-  dual_step_size: 0.01
+  epsilon: 0.01
 
 metrics_server:
   host: metrics
