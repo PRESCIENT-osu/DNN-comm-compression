@@ -425,6 +425,7 @@ def _orchestrator_job(
                                 "-m",
                                 "framework.nodes.orchestrator.runner",
                                 f"/app/experiments/{exp.name}",
+                                "--resume",
                             ],
                             "env": [
                                 {
@@ -897,6 +898,7 @@ def _multi_orchestrator_job(
                                 "-m",
                                 "framework.nodes.orchestrator.multi_runner",
                                 f"/app/experiments/{exp.name}",
+                                "--resume",
                             ],
                             "env": [
                                 {

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import itertools
 import logging
-from enum import Enum
+from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -12,7 +12,7 @@ _VALID_OUTLIER_PRECISION = {"fp16", "int8"}
 _VALID_REGULAR_PRECISION = {"fp16", "int8", "int4", "int2"}
 
 
-class CompressionMethod(str, Enum):
+class CompressionMethod(StrEnum):
     """Supported activation compression methods."""
 
     NONE = "none"
@@ -22,7 +22,7 @@ class CompressionMethod(str, Enum):
     LLMINT8 = "llmint8"
 
 
-class SweepMode(str, Enum):
+class SweepMode(StrEnum):
     """How rates are expanded across links within a sweep entry.
 
     PAIRED applies the same rate index to all links (zip behaviour).
@@ -33,7 +33,7 @@ class SweepMode(str, Enum):
     PRODUCT = "product"
 
 
-class BaselineType(str, Enum):
+class BaselineType(StrEnum):
     """Tags an experiment as a specific type of baseline."""
 
     SINGLE_NODE = "single_node"

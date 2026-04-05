@@ -13,7 +13,7 @@ Generated-side (consumed by opt_runner):
 
 from __future__ import annotations
 
-from enum import Enum
+from enum import StrEnum
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -155,7 +155,7 @@ class OptimizationLoopConfig(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-class ChannelEstimatorType(str, Enum):
+class ChannelEstimatorType(StrEnum):
     """Estimator algorithm for link capacity c_i."""
 
     LAST_OBS = "last_observation"
@@ -165,7 +165,7 @@ class ChannelEstimatorType(str, Enum):
     LCB = "lcb"
 
 
-class ChannelEstimatorHistorySource(str, Enum):
+class ChannelEstimatorHistorySource(StrEnum):
     """Where to load historical probe observations for warm-up."""
 
     METRICS_SERVER = "metrics_server"
@@ -234,7 +234,7 @@ class ProfilingSubExperiment(BaseModel):
     name: str
 
 
-class AccuracyModelBackend(str, Enum):
+class AccuracyModelBackend(StrEnum):
     """Backend for estimating A_k(η)."""
 
     SURROGATE = "surrogate"

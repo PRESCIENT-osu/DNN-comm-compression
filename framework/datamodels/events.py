@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import time
-from enum import Enum
+from enum import StrEnum
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field
 
 
-class EventType(str, Enum):
+class EventType(StrEnum):
     """Metric event types emitted during distributed inference."""
 
     FORWARD_PASS = "forward_pass"

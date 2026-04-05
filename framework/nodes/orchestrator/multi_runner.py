@@ -45,6 +45,7 @@ from framework.datamodels.multi_experiment import (
     WorkloadPattern,
 )
 from framework.nodes.metrics.emitter import MetricsEmitter
+from framework.nodes.orchestrator.controller import run_already_completed
 from framework.nodes.orchestrator.datasets import get_dataset
 from framework.nodes.orchestrator.multi_controller import (
     push_multi_run_config,
@@ -150,6 +151,7 @@ async def run_multi_experiment(
     dry_run: bool,
     node_host: str | None = None,
     metrics_host: str | None = None,
+    resume: bool = False,
 ) -> None:
     """Load and execute a full multi-model experiment.
 
@@ -190,6 +192,8 @@ async def run_multi_experiment(
             dry_run=dry_run,
             node_host=node_host,
             emitter=emitter,
+            metrics_url=metrics_url,
+            resume=resume,
         )
 
     await emitter.stop()
@@ -205,6 +209,8 @@ async def _run_sub_experiment(
     dry_run: bool,
     node_host: str | None,
     emitter: MetricsEmitter,
+    metrics_url: str = "",
+    resume: bool = False,
 ) -> None:
     """Execute one sub-experiment: resolve its sweep and run each resolved run.
 
@@ -245,6 +251,12 @@ async def _run_sub_experiment(
 
     async with client.session():
         for run in runs:
+            if resume and await run_already_completed(
+                run.run_id, "run_throughput", metrics_url, exp.name
+            ):
+                logger.info("[%s] Skipping completed run: %s", sub_exp.name, run.run_id)
+                continue
+
             logger.info("[%s] Starting run: %s", sub_exp.name, run.run_id)
             if run.links:
                 await push_multi_run_config(exp, run, node_host=node_host)
@@ -1035,6 +1047,11 @@ def main() -> None:
         help="Log the sweep plan without executing",
     )
     parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Skip runs that already have results in the metrics server",
+    )
+    parser.add_argument(
         "--node-host",
         default=os.getenv("NODE_HOST"),
         help="Override hostname used to reach all nodes (e.g. 'localhost' when "
@@ -1059,6 +1076,7 @@ def main() -> None:
             dry_run=args.dry_run,
             node_host=args.node_host,
             metrics_host=args.metrics_host,
+            resume=args.resume,
         )
     )
 

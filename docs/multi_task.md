@@ -442,6 +442,7 @@ python -m framework.nodes.orchestrator.multi_runner \
 | `--callback-port` | `8080` / `CALLBACK_PORT` | Callback server port |
 | `--result-timeout` | `300.0` | Per-task result wait timeout (seconds) |
 | `--dry-run` | — | Log sweep plan without executing |
+| `--resume` | — | Skip runs that already have a `RunThroughputEvent` in the metrics server (default when deployed) |
 | `--node-host` | `NODE_HOST` env | Override hostname for all nodes |
 | `--metrics-host` | `METRICS_HOST` env | Override metrics server hostname |
 

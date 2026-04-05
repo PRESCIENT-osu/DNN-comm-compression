@@ -174,6 +174,7 @@ def generate(
             "orchestrator",
             "--callback-port",
             "8080",
+            "--resume",
         ],
         "environment": {"PYTHONUNBUFFERED": "1"},
         "volumes": [
@@ -509,6 +510,7 @@ def generate_multi(
             "orchestrator",
             "--callback-port",
             "8080",
+            "--resume",
         ],
         "environment": {"PYTHONUNBUFFERED": "1"},
         "volumes": orchestrator_volumes,

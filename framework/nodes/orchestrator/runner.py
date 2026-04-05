@@ -15,6 +15,7 @@ from framework.datamodels.spec import GeneratedExperimentConfig, ResolvedSubExpe
 from framework.nodes.metrics.emitter import MetricsEmitter
 from framework.nodes.orchestrator.controller import (
     push_run_config,
+    run_already_completed,
     wait_for_nodes_ready,
 )
 from framework.nodes.orchestrator.data_client import DataClient
@@ -38,6 +39,7 @@ async def run_experiment(
     dry_run: bool,
     node_host: str | None = None,
     metrics_host: str | None = None,
+    resume: bool = False,
 ) -> None:
     """Load and execute a full experiment, handling both legacy and generated formats.
 
@@ -98,6 +100,8 @@ async def run_experiment(
                     dry_run=dry_run,
                     node_host=node_host,
                     emitter=emitter,
+                    metrics_url=metrics_url,
+                    resume=resume,
                 )
 
         await emitter.stop()
@@ -121,6 +125,8 @@ async def run_experiment(
                 dry_run=dry_run,
                 node_host=node_host,
                 emitter=emitter,
+                metrics_url=metrics_url,
+                resume=resume,
             )
 
         await emitter.stop()
@@ -182,6 +188,8 @@ async def _run_sweep(
     dry_run: bool,
     node_host: str | None,
     emitter: MetricsEmitter,
+    metrics_url: str = "",
+    resume: bool = False,
 ) -> None:
     """Execute the sweep for one ExperimentConfig.
 
@@ -219,6 +227,12 @@ async def _run_sweep(
     t_sweep_start = time.perf_counter()
 
     for run in runs:
+        if resume and await run_already_completed(
+            run.run_id, "result", metrics_url, exp.name
+        ):
+            logger.info("%sSkipping completed run: %s", label, run.run_id)
+            continue
+
         logger.info("%sStarting run: %s", label, run.run_id)
 
         if run.links:
@@ -371,6 +385,11 @@ def main() -> None:
         help="Print the sweep plan without executing",
     )
     parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Skip runs that already have results in the metrics server",
+    )
+    parser.add_argument(
         "--node-host",
         default=os.getenv("NODE_HOST"),
         help="Override hostname used to reach all nodes (e.g. 'localhost' when "
@@ -396,6 +415,7 @@ def main() -> None:
             dry_run=args.dry_run,
             node_host=args.node_host,
             metrics_host=args.metrics_host,
+            resume=args.resume,
         )
     )
 

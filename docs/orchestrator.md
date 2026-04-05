@@ -23,6 +23,25 @@ Three orchestrator modes cover different experiment types:
 | `framework/nodes/orchestrator/multi_runner.py` | Multi-model sweep loop, concurrent workload submission, result collection |
 | `framework/nodes/orchestrator/opt_runner.py` | Optimizer experiment runner — slot loop, profiling, accuracy model, adapter interface |
 
+## CLI
+
+```bash
+python -m framework.nodes.orchestrator.runner \
+    experiments/resnet56_equal-split_linear-3_100mbps \
+    --callback-host orchestrator \
+    --callback-port 8080
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--callback-host` | `localhost` / `CALLBACK_HOST` | Hostname nodes use to reach the result callback |
+| `--callback-port` | `8080` / `CALLBACK_PORT` | Callback server port |
+| `--result-timeout` | `300.0` | Per-batch result wait timeout (seconds) |
+| `--dry-run` | — | Print sweep plan without executing |
+| `--resume` | — | Skip runs that already have results in the metrics server (default when deployed) |
+| `--node-host` | `NODE_HOST` env | Override hostname for all nodes |
+| `--metrics-host` | `METRICS_HOST` env | Override metrics server hostname |
+
 ## Sweep Loop
 
 For generated experiments (produced by `tools/generate.py`), the runner iterates sub-experiments sequentially. Each sub-experiment resolves its own sweep and runs all its runs before moving to the next sub-experiment. All sub-experiment runs write to the same metrics directory (`metrics_data/<experiment_name>/`), differentiated by run ID.
@@ -36,6 +55,25 @@ For each resolved run:
 5. **Log summary** — top-1 accuracy for image models; perplexity or accuracy for Llama.
 
 The runner selects the appropriate data client automatically based on `exp.model`: any model name starting with `"llama"` (case-insensitive) uses `LlamaDataClient`; all others use `DataClient`.
+
+## Resuming Interrupted Experiments
+
+`--resume` tells the orchestrator to skip runs that already have results in the metrics server. Before executing each run the orchestrator queries the metrics server for an existing result event matching the run ID and experiment name. If one is found the run is skipped and the next run starts immediately.
+
+**`--resume` is baked into the orchestrator command by the deploy tool for both Docker Compose and Kubernetes deployments.** Restarting the orchestrator container/pod after a crash automatically resumes from where it left off — no manual intervention needed.
+
+**Completion signal used per mode:**
+
+| Mode | Signal | Notes |
+|------|--------|-------|
+| Single-model (`runner.py`) | `ResultEvent` | Emitted per batch — any result for the run ID causes the whole run to be skipped |
+| Multi-model (`multi_runner.py`) | `RunThroughputEvent` | Emitted exactly once per completed run — cleaner skip signal |
+
+**Behaviour on error**: if the metrics server is unreachable when the resume check runs, the check returns `False` and the run executes normally — the flag never causes a run to be silently dropped.
+
+**Partial runs**: if a crash happened mid-run, the existing partial results are left in the metrics server and the run is skipped. This is acceptable for the crash-recovery use case; for exact reproducibility, delete the partial results before restarting.
+
+`--resume` is not available on the optimizer runner (`opt_runner.py`). Profiling and accuracy-model phases already cache their outputs as artifact files validated by config hash — see `framework/nodes/orchestrator/artifacts.py`.
 
 ## Callback Server
 

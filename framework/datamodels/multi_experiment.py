@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import itertools
 import logging
-from enum import Enum
+from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -69,7 +69,7 @@ class MultiNodeConfig(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-class WorkloadPattern(str, Enum):
+class WorkloadPattern(StrEnum):
     """Task submission pattern for the multi-model orchestrator.
 
     FILL maintains a fixed number of in-flight tasks per pipeline at all times,

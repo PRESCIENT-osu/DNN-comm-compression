@@ -114,6 +114,48 @@ async def wait_for_all_idle(
     logger.info("All nodes idle")
 
 
+async def run_already_completed(
+    run_id: str,
+    event_type: str,
+    metrics_url: str,
+    experiment_id: str,
+) -> bool:
+    """Return True if the metrics server has at least one event for this run.
+
+    Used to skip runs that already completed when re-running an experiment
+    with ``--resume``.
+
+    Args:
+        run_id: Run identifier to check.
+        event_type: NDJSON event type to query (e.g. ``"result"`` or
+            ``"run_throughput"``).
+        metrics_url: Base URL of the metrics server.
+        experiment_id: Experiment name passed as ``experiment_name_contains``
+            to scope the query.
+
+    Returns:
+        True if any matching event is found; False otherwise or on error.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(
+                f"{metrics_url}/metrics/query",
+                params={
+                    "event_type": event_type,
+                    "run_id": run_id,
+                    "experiment_name_contains": experiment_id,
+                    "limit": "1",
+                },
+            )
+            resp.raise_for_status()
+            return len(resp.json().get("events", [])) > 0
+    except Exception as exc:
+        logger.warning(
+            "Could not check completion for run '%s': %s — will re-run", run_id, exc
+        )
+        return False
+
+
 async def push_run_config(
     exp: ExperimentConfig,
     run: ResolvedRun,
