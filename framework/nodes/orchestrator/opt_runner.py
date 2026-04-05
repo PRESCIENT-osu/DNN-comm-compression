@@ -212,6 +212,75 @@ async def _push_one_config(
         ) from exc
 
 
+async def push_wfq_weights(
+    s_comp_per_node: dict[str, dict[str, float]],
+    exp: GeneratedOptExperimentConfig,
+    node_host: str | None = None,
+) -> None:
+    """Push per-pipeline WFQ scheduling weights to each node.
+
+    Called once per slot alongside ``push_opt_slot_config`` to apply the
+    compute-share allocation (s_comp) produced by the optimizer.  Each node
+    receives a ``POST /config/weights`` with the pipeline→weight mapping for
+    the pipelines that traverse it.
+
+    If ``s_comp_per_node`` is empty (e.g. infeasible slot), no request is sent
+    and nodes retain their current weights.
+
+    Note: s_comm (per-pipeline link bandwidth shares) is not actuated here —
+    the HTTP transport does not support per-pipeline rate limiting at the link
+    layer.  Nodes use the physical link bandwidth as-is; only compute shares
+    (s_comp) are controlled via WFQ.  Implementing s_comm would require
+    per-pipeline egress shaping at the application layer (TODO).
+
+    Args:
+        s_comp_per_node: ``{node_name: {pipeline_id: weight}}`` from
+            ``extract_s_comp_per_pipeline_per_node``.
+        exp: Generated experiment config (for node host/port lookup).
+        node_host: Override hostname for all nodes.
+    """
+    if not s_comp_per_node:
+        return
+
+    node_map = {n.name: n for n in exp.nodes}
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        tasks = []
+        for node_name, weights in s_comp_per_node.items():
+            node = node_map.get(node_name)
+            if node is None or not weights:
+                continue
+            url = f"http://{node_host or node.host}:{node.port}/config/weights"
+            tasks.append(_push_node_weights(client, url, weights, node_name))
+        if tasks:
+            await asyncio.gather(*tasks)
+
+
+async def _push_node_weights(
+    client: httpx.AsyncClient,
+    url: str,
+    weights: dict[str, float],
+    node_name: str,
+) -> None:
+    """POST WFQ weights to one node, logging on failure without raising.
+
+    Args:
+        client: Shared httpx client.
+        url: Full ``/config/weights`` URL for the node.
+        weights: ``{pipeline_id: weight}`` mapping to apply.
+        node_name: Node name for log messages.
+    """
+    try:
+        resp = await client.post(url, json={"weights": weights})
+        resp.raise_for_status()
+        logger.debug("WFQ weights pushed: node=%s weights=%s", node_name, weights)
+    except Exception as exc:
+        logger.warning(
+            "Failed to push WFQ weights to node '%s': %s — keeping current weights",
+            node_name,
+            exc,
+        )
+
+
 # ---------------------------------------------------------------------------
 # OptRunner
 # ---------------------------------------------------------------------------
@@ -804,9 +873,9 @@ class OptRunner:
         Each slot:
           1. Probe links (every link_probe_interval_slots slots).
           2. Build c_t vector from probe results.
-          3. Call adapter.step(t, c_t) to get eta_per_pipeline_per_link.
+          3. Call adapter.step(t, c_t) to get eta_per_pipeline_per_link and s_comp_per_node.
           4. Call adapter.observe_capacity(c_t) to update estimator state.
-          5. Push compression config to nodes.
+          5. Push compression config and WFQ weights to nodes concurrently.
           6. Submit batches_per_slot tasks and collect SlotResult.
           7. Emit OptSlotEvent, ThroughputConstraintEvent, TaskAccuracyEvent.
           8. Call adapter.update_dual(t, actual_delays).
@@ -843,19 +912,24 @@ class OptRunner:
 
             # --- 3. Optimizer step ---
             t_solve_start = time.perf_counter()
-            eta_per_pipeline_per_link, infeasible = adapter.step(slot_id, c_t)
+            eta_per_pipeline_per_link, s_comp_per_node, infeasible = adapter.step(
+                slot_id, c_t
+            )
             solve_time_ms = (time.perf_counter() - t_solve_start) * 1000.0
 
             # --- 4. Update estimator ---
             adapter.observe_capacity(c_t)
 
-            # --- 5. Push config ---
-            await push_opt_slot_config(
-                eta_per_pipeline_per_link,
-                self._exp,
-                self._mapper,
-                self._node_host,
-                _CONFIG_DRAIN_TIMEOUT_S,
+            # --- 5. Push compression config and WFQ compute-share weights ---
+            await asyncio.gather(
+                push_opt_slot_config(
+                    eta_per_pipeline_per_link,
+                    self._exp,
+                    self._mapper,
+                    self._node_host,
+                    _CONFIG_DRAIN_TIMEOUT_S,
+                ),
+                push_wfq_weights(s_comp_per_node, self._exp, self._node_host),
             )
 
             # --- 6. Run slot ---

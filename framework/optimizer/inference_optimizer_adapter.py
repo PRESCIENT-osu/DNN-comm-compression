@@ -442,6 +442,51 @@ def extract_eta_per_pipeline_per_link(
     return out
 
 
+def extract_s_comp_per_pipeline_per_node(
+    result: dict[int, dict[str, np.ndarray]],
+    inference_tasks: list[InferenceTask],
+    task_id_to_pipeline: dict[int, str],
+    global_order: list[str],
+) -> dict[str, dict[str, float]]:
+    """Convert an optimizer result dict to WFQ weights per node.
+
+    The optimizer's s_comp array for task k has length L_k, with element i
+    corresponding to global node index ``b_k + i``.  After
+    ``scale_allocations_to_unit_sum`` the weights at each shared node sum to 1.
+
+    Args:
+        result: Optimizer output ``{task_id: {"s_comp": ndarray, ...}}``.
+        inference_tasks: List of InferenceTask objects (for b_k / L_k).
+        task_id_to_pipeline: Mapping from task_id to pipeline_id.
+        global_order: Ordered list of all node names.
+
+    Returns:
+        ``{node_name: {pipeline_id: weight}}`` for every node traversed by at
+        least one pipeline in the result.
+    """
+    task_map = {t.task_id: t for t in inference_tasks}
+    out: dict[str, dict[str, float]] = {}
+
+    for task_id, alloc in result.items():
+        pipeline_id = task_id_to_pipeline.get(task_id)
+        if pipeline_id is None:
+            continue
+        task = task_map[task_id]
+        s_comp_vec: np.ndarray = alloc.get("s_comp", np.ones(task.L_k))
+
+        for local_idx in range(task.L_k):
+            global_node_idx = task.b_k + local_idx
+            if global_node_idx >= len(global_order):
+                continue
+            node_name = global_order[global_node_idx]
+            weight = (
+                float(s_comp_vec[local_idx]) if local_idx < len(s_comp_vec) else 1.0
+            )
+            out.setdefault(node_name, {})[pipeline_id] = max(weight, 0.0)
+
+    return out
+
+
 def eta_max_fallback(
     exp: GeneratedOptExperimentConfig,
     pipeline_to_task_id: dict[str, int],
@@ -519,7 +564,9 @@ class BaseOptimizerAdapter(ABC):
         self._exp = exp
 
     @abstractmethod
-    def step(self, t: int, c_t: np.ndarray) -> tuple[dict[str, dict[str, float]], bool]:
+    def step(
+        self, t: int, c_t: np.ndarray
+    ) -> tuple[dict[str, dict[str, float]], dict[str, dict[str, float]], bool]:
         """Run one optimization slot.
 
         Args:
@@ -527,9 +574,11 @@ class BaseOptimizerAdapter(ABC):
             c_t: True link capacity vector of shape ``(M-1,)`` in bps.
 
         Returns:
-            Tuple of (``eta_per_pipeline_per_link``, ``infeasible``).
-            When ``infeasible`` is True the returned etas are the eta_max
-            fallback values.
+            Tuple of (``eta_per_pipeline_per_link``, ``s_comp_per_node``,
+            ``infeasible``).  ``s_comp_per_node`` maps node name to
+            ``{pipeline_id: weight}`` for WFQ scheduling.  When ``infeasible``
+            is True the etas are eta_max fallbacks and ``s_comp_per_node`` is
+            empty.
         """
 
     def observe_capacity(self, c_t: np.ndarray) -> None:  # noqa: B027
@@ -554,14 +603,16 @@ class BaseOptimizerAdapter(ABC):
 
     def _extract(
         self, result: dict[int, dict[str, np.ndarray]] | None
-    ) -> tuple[dict[str, dict[str, float]], bool]:
-        """Extract eta_per_pipeline_per_link from an optimizer result.
+    ) -> tuple[dict[str, dict[str, float]], dict[str, dict[str, float]], bool]:
+        """Extract eta and s_comp from an optimizer result.
 
         Args:
             result: Optimizer output, or ``None`` if infeasible.
 
         Returns:
-            Tuple of (eta_per_pipeline_per_link, infeasible).
+            Tuple of (eta_per_pipeline_per_link, s_comp_per_node, infeasible).
+            On infeasibility, eta is the eta_max fallback and s_comp_per_node
+            is empty (nodes keep their current WFQ weights).
         """
         if result is None:
             logger.warning(
@@ -574,6 +625,7 @@ class BaseOptimizerAdapter(ABC):
                     self._inference_tasks,
                     self._global_order,
                 ),
+                {},
                 True,
             )
         return (
@@ -583,6 +635,12 @@ class BaseOptimizerAdapter(ABC):
                 self._task_id_to_pipeline,
                 self._global_order,
                 self._exp,
+            ),
+            extract_s_comp_per_pipeline_per_node(
+                result,
+                self._inference_tasks,
+                self._task_id_to_pipeline,
+                self._global_order,
             ),
             False,
         )
@@ -620,7 +678,9 @@ class DirectCsiAdapter(BaseOptimizerAdapter):
         )
         self._optimizer = optimizer
 
-    def step(self, t: int, c_t: np.ndarray) -> tuple[dict[str, dict[str, float]], bool]:
+    def step(
+        self, t: int, c_t: np.ndarray
+    ) -> tuple[dict[str, dict[str, float]], dict[str, dict[str, float]], bool]:
         """Run one slot with true link capacities.
 
         Args:
@@ -628,7 +688,7 @@ class DirectCsiAdapter(BaseOptimizerAdapter):
             c_t: True link capacity vector.
 
         Returns:
-            Tuple of (eta_per_pipeline_per_link, infeasible).
+            Tuple of (eta_per_pipeline_per_link, s_comp_per_node, infeasible).
         """
         result = self._optimizer.optimize(t, c_t)
         return self._extract(result)
@@ -684,7 +744,7 @@ class EstimatedAdapter(BaseOptimizerAdapter):
         self,
         t: int,
         c_t: np.ndarray,  # noqa: ARG002
-    ) -> tuple[dict[str, dict[str, float]], bool]:
+    ) -> tuple[dict[str, dict[str, float]], dict[str, dict[str, float]], bool]:
         """Run one slot with the current capacity estimate.
 
         Args:
@@ -692,7 +752,7 @@ class EstimatedAdapter(BaseOptimizerAdapter):
             c_t: True capacity (unused; estimator provides c_hat).
 
         Returns:
-            Tuple of (eta_per_pipeline_per_link, infeasible).
+            Tuple of (eta_per_pipeline_per_link, s_comp_per_node, infeasible).
         """
         c_hat = self._estimator.estimate(t)
         result = self._optimizer.optimize(t, c_hat)
