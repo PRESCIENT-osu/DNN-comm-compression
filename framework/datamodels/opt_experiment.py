@@ -265,9 +265,9 @@ class AccuracyModelSubExperiment(BaseModel):
         min_samples: Minimum records required before fitting; triggers a targeted
             sweep if fewer records are found.
         sweep_rates: η values used for the targeted sweep when min_samples is not met.
-        n_samples: Number of perturbation samples for Stein backends.
-        sigma: Perturbation scale for Stein backends (η ± σZ).
-        partition_paths: Path to partition directory for stein_simulated backend.
+        stein_config: Stein oracle hyperparameters.  Required when backend is
+            ``stein_simulated``.  The full model is loaded from the pipeline's
+            ``simulation_path`` field in the experiment config.
     """
 
     type: Literal["accuracy_model"] = "accuracy_model"
@@ -281,10 +281,8 @@ class AccuracyModelSubExperiment(BaseModel):
     )
     min_samples: int = 50
     sweep_rates: list[float] = Field(default_factory=lambda: [0.1, 0.2, 0.5, 0.8, 1.0])
-    # Stein backends
-    n_samples: int = 30
-    sigma: float = 0.05
-    partition_paths: str | None = None
+    # Stein backend
+    stein_config: SteinOracleConfig | None = None
 
 
 class NoCsiSubExperiment(BaseModel):

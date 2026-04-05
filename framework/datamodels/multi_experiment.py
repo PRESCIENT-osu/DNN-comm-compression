@@ -30,12 +30,18 @@ class PipelineConfig(BaseModel):
         partitions: Mapping from node name to the list of partition IDs loaded on
             that node for this pipeline.
         flow: Node names in execution order, from input to output.
+        simulation_path: Optional path to the full model used by the Stein gradient
+            oracle. For ResNet, path to a ``.th`` checkpoint of the full ResNet56.
+            For Llama, a HuggingFace model name or local model directory.
+            Required when any sub-experiment uses ``backend: stein_simulated`` or
+            sets ``stein_config``. Ignored for surrogate and non-Stein sub-experiments.
     """
 
     name: str
     model: str
     partitions: dict[str, list[str]]
     flow: list[str]
+    simulation_path: str | None = None
 
     @model_validator(mode="after")
     def validate_flow(self) -> PipelineConfig:

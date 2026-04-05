@@ -557,11 +557,28 @@ class OptRunner:
           2. If fewer than min_samples found, run a targeted sweep at sweep_rates.
           3. Fit the model and write to the artifact store.
 
+        For the stein_simulated backend:
+          The Stein oracle is built on-demand in each optimization sub-experiment
+          via ``build_simulations`` + ``build_inference_tasks``.  No training
+          artifact is produced here — this phase is a no-op and returns immediately.
+
         The artifact is reused across restarts if its config hash matches.
 
         Args:
             sub_exp: Accuracy model sub-experiment config.
         """
+        from framework.datamodels.opt_experiment import (
+            AccuracyModelBackend,  # noqa: PLC0415
+        )
+
+        if sub_exp.backend == AccuracyModelBackend.STEIN_SIMULATED:
+            logger.info(
+                "[%s] stein_simulated backend — Stein oracle built per sub-experiment; "
+                "no accuracy model artifact needed",
+                sub_exp.name,
+            )
+            return
+
         artifact_path = self._artifacts.accuracy_model_path(
             sub_exp.pipeline_id, sub_exp.name
         )
@@ -814,14 +831,30 @@ class OptRunner:
             mu: Override mu for NoCsiSubExperiment runs (one call per mu value).
         """
         global_order = build_global_order(self._exp)
+
+        stein_cfg = getattr(sub_exp, "stein_config", None)
+        simulations: dict[str, Any] | None = None
+        if stein_cfg is not None:
+            from framework.optimizer.simulation_factory import (  # noqa: PLC0415
+                build_simulations,
+            )
+
+            simulations = build_simulations(self._exp, stein_cfg)
+            if not simulations:
+                logger.warning(
+                    "[%s] stein_config is set but no pipelines have simulation_path; "
+                    "falling back to dummy accuracy callables",
+                    sub_exp.name,
+                )
+
         inference_tasks, task_id_to_pipeline, pipeline_to_task_id = (
             build_inference_tasks(
                 exp=self._exp,
                 tau_per_node=self._tau_per_node,
                 a_per_link_bytes=self._a_per_link_bytes,
                 global_order=global_order,
-                simulations=None,  # no simulations for now (stein_simulated is Phase 5+)
-                stein_cfg=None,
+                simulations=simulations,
+                stein_cfg=stein_cfg,
             )
         )
 
@@ -844,15 +877,23 @@ class OptRunner:
         run_id = f"{self._exp.name}_{run_name}_{uuid.uuid4().hex[:6]}"
         logger.info("[%s] Starting optimization run via adapter", run_name)
 
-        await self._run_slot_loop_adapter(
-            adapter=adapter,
-            sub_exp_name=run_name,
-            run_id=run_id,
-            global_order=global_order,
-            task_id_to_pipeline=task_id_to_pipeline,
-            pipeline_to_task_id=pipeline_to_task_id,
-            inference_tasks=inference_tasks,
-        )
+        try:
+            await self._run_slot_loop_adapter(
+                adapter=adapter,
+                sub_exp_name=run_name,
+                run_id=run_id,
+                global_order=global_order,
+                task_id_to_pipeline=task_id_to_pipeline,
+                pipeline_to_task_id=pipeline_to_task_id,
+                inference_tasks=inference_tasks,
+            )
+        finally:
+            if simulations:
+                for sim in simulations.values():
+                    try:
+                        sim.remove_hooks()
+                    except Exception:
+                        pass
 
     # ------------------------------------------------------------------
     # Shared slot loop (adapter-based)
