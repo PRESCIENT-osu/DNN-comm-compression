@@ -12,6 +12,7 @@ directly to ``build_inference_tasks`` as the ``simulations`` argument.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -21,6 +22,7 @@ if TYPE_CHECKING:
     from framework.datamodels.experiment import DatasetConfig
     from framework.datamodels.opt_experiment import (
         GeneratedOptExperimentConfig,
+        OptLinkConfig,
         SteinOracleConfig,
     )
 
@@ -203,9 +205,51 @@ class _MMLULocalEvaluator:
 # ---------------------------------------------------------------------------
 
 
+def _build_compress_fns(
+    pipeline_name: str,
+    flow: list[str],
+    links: list[OptLinkConfig],
+    mapper: Any,
+) -> list[Callable[[torch.Tensor, float], torch.Tensor]]:
+    """Build one compress_fn per inter-node link for a pipeline.
+
+    Args:
+        pipeline_name: Pipeline identifier (used as pipeline_id in the mapper).
+        flow: Ordered node IDs for this pipeline.
+        links: All link configs from the experiment.
+        mapper: Initialised ``CompressionMapper`` for the experiment.
+
+    Returns:
+        List of callables, one per link, in flow order.
+    """
+    from framework.optimizer.compression_simulator import (  # noqa: PLC0415
+        build_compress_fn,
+        identity_compress_fn,
+    )
+
+    link_map = {(lk.from_node, lk.to_node): lk for lk in links}
+    fns: list[Callable[[torch.Tensor, float], torch.Tensor]] = []
+    for i in range(len(flow) - 1):
+        key = (flow[i], flow[i + 1])
+        lk = link_map.get(key)
+        if lk is None:
+            logger.warning(
+                "No link config found for %s→%s in pipeline '%s'; "
+                "using identity (no compression)",
+                flow[i],
+                flow[i + 1],
+                pipeline_name,
+            )
+            fns.append(identity_compress_fn)
+        else:
+            fns.append(build_compress_fn(mapper, lk.link_id, pipeline_name))
+    return fns
+
+
 def build_simulations(
     exp: GeneratedOptExperimentConfig,
     stein_cfg: SteinOracleConfig | None = None,
+    mapper: Any | None = None,
 ) -> dict[str, Any]:
     """Build simulation pipeline objects for all pipelines with ``simulation_path`` set.
 
@@ -218,6 +262,10 @@ def build_simulations(
         stein_cfg: Stein oracle config, used to size the fast evaluator for Llama
             (``n_fast_samples``).  If ``None``, the full dataset config is used
             for both fast and full evaluators.
+        mapper: Initialised ``CompressionMapper`` for the experiment.  Used to
+            build per-link ``compress_fns`` that match the deployed compressor
+            scheme.  If ``None``, simulation pipelines default to per-sample
+            top-k for all links.
 
     Returns:
         Dict mapping ``pipeline.name → simulation object``
@@ -238,6 +286,12 @@ def build_simulations(
 
         model_key = pipeline.model.lower()
 
+        compress_fns = (
+            _build_compress_fns(pipeline.name, pipeline.flow, exp.links, mapper)
+            if mapper is not None
+            else None
+        )
+
         if model_key in _MODEL_RESNET:
             cfg = exp.datasets.get("resnet")
             if cfg is None:
@@ -252,6 +306,7 @@ def build_simulations(
                 partitions=pipeline.partitions,
                 flow=pipeline.flow,
                 test_loader=loader,
+                compress_fns=compress_fns,
             )
             result[pipeline.name] = sim
             logger.info(
@@ -289,6 +344,7 @@ def build_simulations(
                 flow=pipeline.flow,
                 fast_evaluator=fast_evaluator,
                 full_evaluator=full_evaluator,
+                compress_fns=compress_fns,
             )
             result[pipeline.name] = sim
             logger.info(

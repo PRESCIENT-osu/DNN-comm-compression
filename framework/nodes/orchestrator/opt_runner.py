@@ -839,7 +839,7 @@ class OptRunner:
                 build_simulations,
             )
 
-            simulations = build_simulations(self._exp, stein_cfg)
+            simulations = build_simulations(self._exp, stein_cfg, self._mapper)
             if not simulations:
                 logger.warning(
                     "[%s] stein_config is set but no pipelines have simulation_path; "

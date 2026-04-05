@@ -76,21 +76,11 @@ links:
     allowed_methods: [topk]
     llmint8_mapping:
       resnet-a:
-        entries:
-          - feature_k_values: [0.85]
-            outlier_values: [0.01]
-          - feature_k_values: [0.70]
-            outlier_values: [0.05]
-          - feature_k_values: [0.50]
-            outlier_values: [0.10]
+        outlier_precision: fp16
+        regular_precision: int8
       llama-mmlu-a:
-        entries:
-          - feature_k_values: [0.90]
-            outlier_values: [0.005]
-          - feature_k_values: [0.75]
-            outlier_values: [0.02]
-          - feature_k_values: [0.60]
-            outlier_values: [0.05]
+        outlier_precision: fp16
+        regular_precision: int8
 
   - from: B
     to: C

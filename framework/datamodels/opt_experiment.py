@@ -49,42 +49,18 @@ class OptTaskConfig(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-class LLMInt8MappingEntry(BaseModel):
-    """One feasible (feature_k_values, outlier_values) codec configuration.
-
-    Used for nearest-neighbour lookup when mapping a continuous η to a
-    concrete LLMInt8 execution plan.
-
-    Args:
-        feature_k_values: Per-link compression ratio values that characterise
-            this entry in the optimizer's η space.
-        outlier_values: Per-link outlier fraction values corresponding to
-            feature_k_values.
-    """
-
-    feature_k_values: list[float]
-    outlier_values: list[float]
-
-    @model_validator(mode="after")
-    def validate_lengths(self) -> LLMInt8MappingEntry:
-        """Validate that feature_k_values and outlier_values have equal length."""
-        if len(self.feature_k_values) != len(self.outlier_values):
-            raise ValueError(
-                "feature_k_values and outlier_values must have the same length"
-            )
-        return self
-
-
 class LLMInt8PipelineMapping(BaseModel):
-    """LLMInt8 codec mapping table for one pipeline on one link.
+    """LLMInt8 precision config for one pipeline on one link.
+
+    The optimizer's η is used directly as the outlier fraction — the top-η
+    fraction of activation elements by magnitude are kept at ``outlier_precision``
+    and the remaining elements are quantized to ``regular_precision``.
 
     Args:
-        entries: Ordered list of feasible codec configurations.
-        outlier_precision: Float dtype for outlier columns (default: ``"fp16"``).
-        regular_precision: Integer dtype for regular columns (default: ``"int8"``).
+        outlier_precision: Float dtype for the outlier group (default: ``"fp16"``).
+        regular_precision: Integer dtype for the regular group (default: ``"int8"``).
     """
 
-    entries: list[LLMInt8MappingEntry]
     outlier_precision: str = "fp16"
     regular_precision: str = "int8"
 
@@ -98,8 +74,9 @@ class OptLinkConfig(BaseModel):
         eta_min: Minimum compression ratio (most compressed).
         eta_max: Maximum compression ratio (least compressed; 1.0 = no compression).
         allowed_methods: Compression methods the optimizer may select for this link.
-        llmint8_mapping: Per-pipeline LLMInt8 codec mapping tables.  Required
-            when ``"llmint8"`` is in allowed_methods.
+        llmint8_mapping: Per-pipeline LLMInt8 precision config.  Required when
+            ``"llmint8"`` is in allowed_methods.  The optimizer's η is used
+            directly as the outlier fraction for each pipeline.
     """
 
     model_config = ConfigDict(populate_by_name=True)

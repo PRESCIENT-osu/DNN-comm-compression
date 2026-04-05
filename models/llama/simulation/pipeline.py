@@ -1,8 +1,8 @@
 """Simulated Llama pipeline for Stein gradient oracle accuracy evaluation.
 
-Loads the full HF Llama model and installs LLMActivationCompressor hooks at
-the inter-node partition boundaries defined by the pipeline config.  No
-partition .pt files are required.  The full model's forward() handles all
+Loads the full HF Llama model and installs per-link activation compression
+hooks at the inter-node partition boundaries defined by the pipeline config.
+No partition .pt files are required.  The full model's forward() handles all
 position_ids, RoPE embeddings, and attention masking internally; hooks only
 intercept and compress the hidden states flowing between nodes.
 
@@ -14,34 +14,25 @@ Partition boundary layer indices match partition_llama.py:
 The eta vector has one element per inter-node link (len(flow) - 1).
 Element eta[i] is the compression ratio for link flow[i] → flow[i+1].
 
+Compression is applied via injected ``compress_fns`` callables, one per link,
+matching the scheme used by the deployed compressors on the nodes.
+
 Evaluation strategy (MMLU accuracy or WikiText perplexity) is provided by
-the adapter as an Evaluator callable, keeping this module dataset-agnostic.
+the adapter as a LlamaEvaluator callable, keeping this module dataset-agnostic.
 """
 
 from __future__ import annotations
 
 import logging
-import sys
 from collections.abc import Callable
-from pathlib import Path
 from typing import Protocol
 
 import torch
+import torch.nn as nn
+
+from framework.optimizer.compression_simulator import topk_sparsify_per_sample
 
 logger = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# External dependency path setup
-# ---------------------------------------------------------------------------
-
-_EXTERNAL_ROOT = Path(__file__).parents[3] / "external" / "Inference_Optimizer"
-if str(_EXTERNAL_ROOT) not in sys.path:
-    sys.path.insert(0, str(_EXTERNAL_ROOT))
-
-from src.core.llm_compression import (  # noqa: E402
-    ActivationCompressionConfig,
-    LLMActivationCompressor,
-)
 
 # ---------------------------------------------------------------------------
 # Partition boundary index table
@@ -86,12 +77,16 @@ class LlamaEvaluator(Protocol):
 class SimulatedLlamaPipeline:
     """Full-model Llama simulation with inter-node compression hooks.
 
-    Loads the full HF Llama model and installs LLMActivationCompressor hooks
-    at the decoder layer indices that correspond to the inter-node partition
+    Loads the full HF Llama model and installs post-forward hooks at the
+    decoder layer indices that correspond to the inter-node partition
     boundaries.  Because the full model's forward() runs all layers in a
     single pass, position_ids, RoPE embeddings, and the 4D causal mask are
     computed once and threaded internally — no manual threading between
     partition calls, no calling-convention mismatch.
+
+    Each hook compresses the hidden state tensor ``[B, L, D]`` using the
+    injected ``compress_fns[link_idx]`` callable, simulating the per-sample
+    compression applied by the deployed compressor on the sending node.
 
     The evaluator is injected by the adapter to keep this module agnostic to
     the downstream task (MMLU, WikiText, etc.).
@@ -105,9 +100,10 @@ class SimulatedLlamaPipeline:
             gradient oracle (low sample count for speed).
         full_evaluator: Evaluator used for accuracy_callable_true (full
             evaluation set, called once per slot).
-        activation_strategy: Compression strategy passed to
-            LLMActivationCompressor (``"topk_per_token"``, ``"magnitude"``,
-            ``"random"``, or ``"quantization"``).
+        compress_fns: One callable per inter-node link.  Each callable has
+            signature ``(tensor: Tensor, eta: float) -> Tensor`` and simulates
+            the deployed compressor's round-trip information loss for that link.
+            If ``None``, defaults to ``topk_sparsify_per_sample`` for all links.
         device: Compute device.  Defaults to CUDA if available, else CPU.
         torch_dtype: Model weight dtype.  Defaults to bfloat16 on CUDA.
     """
@@ -119,7 +115,7 @@ class SimulatedLlamaPipeline:
         flow: list[str],
         fast_evaluator: LlamaEvaluator,
         full_evaluator: LlamaEvaluator,
-        activation_strategy: str = "topk_per_token",
+        compress_fns: list[Callable[[torch.Tensor, float], torch.Tensor]] | None = None,
         device: torch.device | None = None,
         torch_dtype: torch.dtype | None = None,
     ) -> None:
@@ -148,7 +144,21 @@ class SimulatedLlamaPipeline:
         # Derive the decoder layer indices for each inter-node link.
         n_layers = len(self.model.model.layers)
         self._n_links: int = len(flow) - 1
-        layer_indices: list[int] = []
+        self._eta: list[float] = [1.0] * self._n_links
+        self._handles: list[torch.utils.hooks.RemovableHandle] = []
+
+        if compress_fns is None:
+            self._compress_fns: list[Callable[[torch.Tensor, float], torch.Tensor]] = [
+                topk_sparsify_per_sample for _ in range(self._n_links)
+            ]
+        else:
+            if len(compress_fns) != self._n_links:
+                raise ValueError(
+                    f"Expected {self._n_links} compress_fns (one per link), "
+                    f"got {len(compress_fns)}"
+                )
+            self._compress_fns = compress_fns
+
         for link_idx in range(self._n_links):
             sender = flow[link_idx]
             last_partition = partitions[sender][-1]
@@ -159,30 +169,36 @@ class SimulatedLlamaPipeline:
                     f"Supported: {list(_PARTITION_LAST_LAYER)}"
                 )
             layer_idx = _PARTITION_LAST_LAYER[last_partition](n_layers)
-            layer_indices.append(layer_idx)
+            layer: nn.Module = self.model.model.layers[layer_idx]
+            handle = layer.register_forward_hook(self._make_hook(link_idx))
+            self._handles.append(handle)
             logger.debug(
-                "Link %s→%s: last partition %s → hook at decoder layer %d",
+                "Installed post hook at decoder layer %d for link %s→%s (eta[%d])",
+                layer_idx,
                 flow[link_idx],
                 flow[link_idx + 1],
-                last_partition,
-                layer_idx,
+                link_idx,
             )
-
-        compression_cfg = ActivationCompressionConfig(
-            strategy=activation_strategy,
-            layer_indices=layer_indices,
-        )
-        self.compressor = LLMActivationCompressor(self.model, compression_cfg)
-        logger.info(
-            "LLMActivationCompressor installed at layers %s (strategy=%s)",
-            layer_indices,
-            activation_strategy,
-        )
 
     @property
     def n_links(self) -> int:
         """Number of inter-node links (= dimension of eta)."""
         return self._n_links
+
+    def set_eta(self, eta: torch.Tensor) -> None:
+        """Update compression ratios in-place.
+
+        Args:
+            eta: Tensor of shape (n_links,) with values in [0, 1].
+
+        Raises:
+            ValueError: If eta length does not match the number of links.
+        """
+        if eta.numel() != self._n_links:
+            raise ValueError(
+                f"Expected eta of length {self._n_links}, got {eta.numel()}"
+            )
+        self._eta = [float(torch.clamp(v, 0.0, 1.0).item()) for v in eta]
 
     def accuracy(self, eta: torch.Tensor, *, full: bool = False) -> float:
         """Evaluate task accuracy with given compression ratios.
@@ -200,14 +216,31 @@ class SimulatedLlamaPipeline:
         Raises:
             ValueError: If eta length does not match the number of links.
         """
-        if eta.numel() != self._n_links:
-            raise ValueError(
-                f"Expected eta of length {self._n_links}, got {eta.numel()}"
-            )
-        self.compressor.set_eta(eta)
+        self.set_eta(eta)
         evaluator = self.full_evaluator if full else self.fast_evaluator
         return evaluator.evaluate(self.model, self.device)
 
     def remove_hooks(self) -> None:
         """Remove all installed forward hooks."""
-        self.compressor.remove_hooks()
+        for h in self._handles:
+            try:
+                h.remove()
+            except Exception:
+                pass
+        self._handles = []
+
+    def _make_hook(self, link_idx: int):
+        def hook(
+            module: nn.Module,
+            args: tuple,
+            output: torch.Tensor | tuple,
+        ) -> torch.Tensor | tuple:
+            # HF decoder layers return a tuple: (hidden_state, ...).
+            # Compress only the hidden state (index 0).
+            if isinstance(output, tuple):
+                hidden = output[0]
+                compressed = self._compress_fns[link_idx](hidden, self._eta[link_idx])
+                return (compressed,) + output[1:]
+            return self._compress_fns[link_idx](output, self._eta[link_idx])
+
+        return hook

@@ -6,12 +6,16 @@ pair that the node controller pushes to nodes.
 
 Supported methods
 -----------------
-- ``topk``    — η is the fraction of activation values to transmit.  Params:
-                ``{"k": eta}``.
-- ``llmint8`` — quantisation with mixed precision controlled by two parameters
-                ``(feature_k, outlier_fraction)``.  The closest entry in the
-                link's ``llmint8_mapping`` table is selected using a nearest-η
-                look-up on the ``feature_k_values`` column.
+- ``topk``         — η is the fraction of activation values to transmit.
+                     Params: ``{"k": eta}``.
+- ``quantization`` — η is snapped to the nearest valid discrete rate
+                     ``{0.5, 0.25, 0.125, 0.0625}`` (fp16/int8/int4/int2).
+                     Params: ``{"rate": snapped_rate}``.
+- ``llmint8``      — η is used directly as the outlier fraction: the top-η
+                     fraction of elements by magnitude are stored at
+                     ``outlier_precision`` (default: fp16) and the rest at
+                     ``regular_precision`` (default: int8).
+                     Params: ``{"rate": eta, "outlier_precision": ..., "regular_precision": ...}``.
 """
 
 from __future__ import annotations
@@ -20,7 +24,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
-from framework.datamodels.opt_experiment import LLMInt8PipelineMapping, OptLinkConfig
+from framework.datamodels.opt_experiment import OptLinkConfig
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +100,10 @@ class CompressionMapper:
             if pipeline_mapping is not None:
                 return self._map_llmint8(pipeline_mapping, eta)
 
+        # Try quantization if allowed.
+        if "quantization" in allowed:
+            return self._map_quantization(eta)
+
         # Default to topk.
         return CompressionDecision(
             method="topk",
@@ -120,53 +128,49 @@ class CompressionMapper:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _map_llmint8(
-        self,
-        mapping: LLMInt8PipelineMapping,
-        eta: float,
-    ) -> CompressionDecision:
-        """Select the llmint8 table entry closest to η.
+    _QUAN_RATES: list[float] = [0.5, 0.25, 0.125, 0.0625]
 
-        The mapping table is sorted by decreasing ``feature_k_values[0]``
-        (higher feature_k = less compression = higher η).  The entry with
-        the closest ``feature_k_values[0]`` to ``eta`` is selected.
+    def _map_quantization(self, eta: float) -> CompressionDecision:
+        """Snap η to the nearest valid quantization rate.
 
         Args:
-            mapping: Pipeline-level llmint8 mapping config.
             eta: Target compression rate.
 
         Returns:
-            CompressionDecision for the best-matching table entry.
+            CompressionDecision with method ``"quantization"`` and the snapped rate.
         """
-        if not mapping.entries:
-            logger.warning("llmint8 mapping has no entries; falling back to topk")
-            return CompressionDecision(
-                method="topk", params={"k": eta}, effective_eta=eta
-            )
+        snapped = min(self._QUAN_RATES, key=lambda r: abs(r - eta))
+        return CompressionDecision(
+            method="quantization",
+            params={"rate": snapped},
+            effective_eta=snapped,
+        )
 
-        # Build sorted list of (feature_k, entry_index) for binary search.
-        fk_values = [e.feature_k_values[0] for e in mapping.entries]
+    def _map_llmint8(
+        self,
+        mapping: Any,
+        eta: float,
+    ) -> CompressionDecision:
+        """Map η directly to an LLMInt8 compression decision.
 
-        # Find the closest feature_k to eta.
-        best_idx = 0
-        best_dist = abs(fk_values[0] - eta)
-        for i, fk in enumerate(fk_values[1:], 1):
-            dist = abs(fk - eta)
-            if dist < best_dist:
-                best_dist = dist
-                best_idx = i
+        η is used as the outlier fraction: the top-η fraction of activation
+        elements by magnitude are stored at ``outlier_precision``; the rest
+        are quantized to ``regular_precision``.  This matches the library's
+        convention where η is passed directly as the outlier ratio.
 
-        entry = mapping.entries[best_idx]
-        effective_eta = entry.feature_k_values[0]
+        Args:
+            mapping: Pipeline-level LLMInt8PipelineMapping config.
+            eta: Optimizer-selected compression rate in [0, 1].
 
-        params: dict[str, Any] = {
-            "feature_k_values": entry.feature_k_values,
-            "outlier_values": entry.outlier_values,
-            "outlier_precision": mapping.outlier_precision,
-            "regular_precision": mapping.regular_precision,
-        }
+        Returns:
+            CompressionDecision with method ``"llmint8"`` and the precision params.
+        """
         return CompressionDecision(
             method="llmint8",
-            params=params,
-            effective_eta=effective_eta,
+            params={
+                "rate": eta,
+                "outlier_precision": mapping.outlier_precision,
+                "regular_precision": mapping.regular_precision,
+            },
+            effective_eta=eta,
         )

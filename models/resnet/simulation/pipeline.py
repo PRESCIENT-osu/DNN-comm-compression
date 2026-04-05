@@ -12,19 +12,21 @@ Partition → hook target mapping in the full ResNet56:
   p4  →  post-forward on model.layer3  (captures layer3 output, before functional avgpool)
 
 The eta vector has one element per inter-node link (len(flow) - 1).
-Compression is top-k magnitude sparsification, consistent with the deployed
-TopK compressor on the nodes.
+Compression is applied via injected ``compress_fns`` callables, one per link,
+matching the scheme used by the deployed compressors on the nodes.
 """
 
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from pathlib import Path
 
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
+from framework.optimizer.compression_simulator import topk_sparsify_per_sample
 from models.resnet.partition_resnet56 import ResNet56
 from models.resnet.partition_resnet56 import load_model as _load_resnet56
 
@@ -39,18 +41,6 @@ _BOUNDARY: dict[str, tuple[str, str]] = {
     "p3": ("layer3", "pre"),
     "p4": ("layer3", "post"),  # p5 starts with functional avgpool; hook layer3 output
 }
-
-
-def _topk_sparsify(x: torch.Tensor, eta: float) -> torch.Tensor:
-    """Top-k magnitude sparsification matching the deployed TopK compressor."""
-    if eta >= 1.0:
-        return x
-    if eta <= 0.0:
-        return torch.zeros_like(x)
-    flat = x.flatten()
-    k = max(1, int(eta * flat.numel()))
-    thresh = flat.abs().topk(k).values.min()
-    return (flat * (flat.abs() >= thresh)).reshape_as(x)
 
 
 class SimulatedResNetPipeline:
@@ -72,6 +62,10 @@ class SimulatedResNetPipeline:
         flow: Ordered list of node IDs for this pipeline, e.g. ``["A", "B", "C"]``.
         test_loader: DataLoader yielding (image_tensor, label_tensor) batches
             for CIFAR-10 accuracy evaluation.
+        compress_fns: One callable per inter-node link.  Each callable has
+            signature ``(tensor: Tensor, eta: float) -> Tensor`` and simulates
+            the deployed compressor's round-trip information loss for that link.
+            If ``None``, defaults to ``topk_sparsify_per_sample`` for all links.
         device: Compute device.  Defaults to CPU.
     """
 
@@ -81,6 +75,7 @@ class SimulatedResNetPipeline:
         partitions: dict[str, list[str]],
         flow: list[str],
         test_loader: DataLoader,
+        compress_fns: list[Callable[[torch.Tensor, float], torch.Tensor]] | None = None,
         device: torch.device | None = None,
     ) -> None:
         self.device = device or torch.device("cpu")
@@ -93,6 +88,18 @@ class SimulatedResNetPipeline:
         self._n_links: int = len(flow) - 1
         self._eta: list[float] = [1.0] * self._n_links
         self._handles: list[torch.utils.hooks.RemovableHandle] = []
+
+        if compress_fns is None:
+            self._compress_fns: list[Callable[[torch.Tensor, float], torch.Tensor]] = [
+                topk_sparsify_per_sample for _ in range(self._n_links)
+            ]
+        else:
+            if len(compress_fns) != self._n_links:
+                raise ValueError(
+                    f"Expected {self._n_links} compress_fns (one per link), "
+                    f"got {len(compress_fns)}"
+                )
+            self._compress_fns = compress_fns
 
         for link_idx in range(self._n_links):
             sender = flow[link_idx]
@@ -186,13 +193,13 @@ class SimulatedResNetPipeline:
 
     def _make_pre_hook(self, link_idx: int):
         def hook(module: nn.Module, args: tuple) -> tuple:
-            compressed = _topk_sparsify(args[0], self._eta[link_idx])
+            compressed = self._compress_fns[link_idx](args[0], self._eta[link_idx])
             return (compressed,) + args[1:]
 
         return hook
 
     def _make_post_hook(self, link_idx: int):
         def hook(module: nn.Module, args: tuple, output: torch.Tensor) -> torch.Tensor:
-            return _topk_sparsify(output, self._eta[link_idx])
+            return self._compress_fns[link_idx](output, self._eta[link_idx])
 
         return hook
