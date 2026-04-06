@@ -595,6 +595,7 @@ class MultiDataClient:
         results: dict[str, list[tuple[list[int], Any]]],
         lock: asyncio.Lock,
         emitter: MetricsEmitter,
+        sub_experiment_name: str | None = None,
     ) -> None:
         """Submit one task to its pipeline's first node and collect the result.
 
@@ -614,6 +615,7 @@ class MultiDataClient:
             results: Mutable per-pipeline result accumulator.
             lock: Shared asyncio lock protecting latencies/results.
             emitter: Metrics emitter.
+            sub_experiment_name: Active sub-experiment name; None for standalone sweeps.
         """
         task_id = f"{run.run_id}_{pipeline_id}_{batch_idx}_{uuid.uuid4().hex[:6]}"
 
@@ -667,6 +669,7 @@ class MultiDataClient:
                     submit_time=submit_time,
                     receive_time=receive_time,
                     latency_ms=latency_ms,
+                    sub_experiment_name=sub_experiment_name,
                 )
             )
 
@@ -759,6 +762,7 @@ class MultiDataClient:
                         results=results,
                         lock=lock,
                         emitter=emitter,
+                        sub_experiment_name=sub_experiment_name,
                     )
                 )
                 all_tasks.append(task)

@@ -183,6 +183,10 @@ class TaskE2EEvent(BaseEvent):
 
     Measures wall-clock time from when the task was submitted to the first node
     until the result was received at the orchestrator callback.
+
+    ``sub_experiment_name`` is set by the opt_runner so that per-task latency
+    records can be grouped by algorithm/sub-experiment in post-experiment analysis
+    without parsing the run_id string.
     """
 
     event_type: Literal[EventType.TASK_E2E] = EventType.TASK_E2E
@@ -191,6 +195,7 @@ class TaskE2EEvent(BaseEvent):
     submit_time: float
     receive_time: float
     latency_ms: float
+    sub_experiment_name: str | None = None
 
 
 class RunThroughputEvent(BaseEvent):
