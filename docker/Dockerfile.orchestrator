@@ -24,6 +24,7 @@ RUN pip install --no-cache-dir \
     httpx \
     pyyaml \
     pydantic \
+    numpy \
     transformers \
     datasets \
     accelerate \
@@ -45,4 +46,4 @@ COPY external/Inference_Optimizer/src/ ./external/Inference_Optimizer/src/
 ENV HF_HOME=/hf_cache
 ENV PYTHONUNBUFFERED=1
 
-CMD ["python", "-m", "framework.nodes.orchestrator.runner"]
+CMD ["python", "-m", "framework.nodes.orchestrator.opt_runner"]

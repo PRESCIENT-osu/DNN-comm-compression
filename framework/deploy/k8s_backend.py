@@ -413,8 +413,23 @@ def _orchestrator_job(
         "spec": {
             "backoffLimit": 0,
             "template": {
+                "metadata": {
+                    "labels": {"app": job_name, "experiment": exp.name},
+                },
                 "spec": {
                     "restartPolicy": "Never",
+                    "affinity": {
+                        "podAntiAffinity": {
+                            "requiredDuringSchedulingIgnoredDuringExecution": [
+                                {
+                                    "labelSelector": {
+                                        "matchLabels": {"experiment": exp.name}
+                                    },
+                                    "topologyKey": "kubernetes.io/hostname",
+                                }
+                            ]
+                        }
+                    },
                     "containers": [
                         {
                             "name": "orchestrator",
@@ -441,7 +456,7 @@ def _orchestrator_job(
                         }
                     ],
                     "volumes": volumes,
-                }
+                },
             },
         },
     }
@@ -795,8 +810,23 @@ def _opt_orchestrator_job(
         "spec": {
             "backoffLimit": 0,
             "template": {
+                "metadata": {
+                    "labels": {"app": job_name, "experiment": exp.name},
+                },
                 "spec": {
                     "restartPolicy": "Never",
+                    "affinity": {
+                        "podAntiAffinity": {
+                            "requiredDuringSchedulingIgnoredDuringExecution": [
+                                {
+                                    "labelSelector": {
+                                        "matchLabels": {"experiment": exp.name}
+                                    },
+                                    "topologyKey": "kubernetes.io/hostname",
+                                }
+                            ]
+                        }
+                    },
                     "containers": [
                         {
                             "name": "orchestrator",
@@ -818,11 +848,15 @@ def _opt_orchestrator_job(
                                 {"name": "CALLBACK_PORT", "value": "8080"},
                                 {"name": "PYTHONUNBUFFERED", "value": "1"},
                             ],
+                            "resources": {
+                                "requests": {"nvidia.com/gpu": "1"},
+                                "limits": {"nvidia.com/gpu": "1"},
+                            },
                             "volumeMounts": volume_mounts,
                         }
                     ],
                     "volumes": volumes,
-                }
+                },
             },
         },
     }
@@ -886,8 +920,23 @@ def _multi_orchestrator_job(
         "spec": {
             "backoffLimit": 0,
             "template": {
+                "metadata": {
+                    "labels": {"app": job_name, "experiment": exp.name},
+                },
                 "spec": {
                     "restartPolicy": "Never",
+                    "affinity": {
+                        "podAntiAffinity": {
+                            "requiredDuringSchedulingIgnoredDuringExecution": [
+                                {
+                                    "labelSelector": {
+                                        "matchLabels": {"experiment": exp.name}
+                                    },
+                                    "topologyKey": "kubernetes.io/hostname",
+                                }
+                            ]
+                        }
+                    },
                     "containers": [
                         {
                             "name": "orchestrator",
@@ -914,7 +963,7 @@ def _multi_orchestrator_job(
                         }
                     ],
                     "volumes": volumes,
-                }
+                },
             },
         },
     }
