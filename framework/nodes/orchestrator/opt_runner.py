@@ -39,6 +39,7 @@ import numpy as np  # noqa: F401
 from framework.datamodels.api import MultiConfigUpdate
 from framework.datamodels.events import (
     OptSlotEvent,
+    SubExperimentEvent,
     TaskAccuracyEvent,
     ThroughputConstraintEvent,
 )
@@ -345,7 +346,21 @@ class OptRunner:
             logger.info(
                 "=== Sub-experiment: %s (type=%s) ===", sub_exp.name, sub_exp.type
             )
+            t_sub_start = time.perf_counter()
             await self._run_sub_experiment(sub_exp)
+            duration_s = time.perf_counter() - t_sub_start
+            logger.info(
+                "[%s] Sub-experiment complete in %.1fs", sub_exp.name, duration_s
+            )
+            self._emitter.emit(
+                SubExperimentEvent(
+                    experiment_id=self._exp.name,
+                    run_id=sub_exp.name,
+                    sub_experiment_name=sub_exp.name,
+                    duration_s=duration_s,
+                    n_runs=self._exp.optimization_loop.n_slots,
+                )
+            )
         logger.info("Optimization experiment '%s' complete", self._exp.name)
 
     async def _run_sub_experiment(self, sub_exp: OptSubExperiment) -> None:
@@ -413,6 +428,7 @@ class OptRunner:
             slot_id=None,
             experiment_id=self._exp.name,
             run_id=run_id,
+            sub_experiment_name=sub_exp.name,
         )
         self._nominal_bps_per_link = probe_results
 
@@ -752,6 +768,7 @@ class OptRunner:
                     n_samples=len(
                         slot_result.per_pipeline_latency_ms.get(sub_exp.pipeline_id, [])
                     ),
+                    sub_experiment_name=sub_exp.name,
                 )
             )
             logger.debug("[%s] Sweep η=%.2f → accuracy=%.4f", sub_exp.name, eta, acc)
@@ -944,6 +961,7 @@ class OptRunner:
                     slot_id=slot_id,
                     experiment_id=self._exp.name,
                     run_id=run_id,
+                    sub_experiment_name=sub_exp_name,
                 )
             else:
                 probe_bps = self._link_prober.latest_estimates()
@@ -957,6 +975,9 @@ class OptRunner:
                 slot_id, c_t
             )
             solve_time_ms = (time.perf_counter() - t_solve_start) * 1000.0
+            # Capture dual variables immediately after step(), before update_dual()
+            # advances them — these are the λ values that drove this slot's decision.
+            lambda_per_task = adapter.get_dual_variables()
 
             # --- 4. Update estimator ---
             adapter.observe_capacity(c_t)
@@ -980,11 +1001,14 @@ class OptRunner:
                 run_id=slot_run_id,
                 node_host=self._node_host,
                 emitter=self._emitter,
+                slot_id=slot_id,
+                sub_experiment_name=sub_exp_name,
             )
 
             # --- 7. Emit events ---
             achieved_rps: dict[str, float] = {}
             d_excess: dict[str, float] = {}
+            throughput_shortfall: dict[str, float] = {}
             actual_delays: dict[int, float] = {}
 
             for pid in pipeline_ids:
@@ -992,8 +1016,14 @@ class OptRunner:
                 target_rps = task_cfg.throughput_target if task_cfg else 0.0
                 rps = slot_result.achieved_rps(pid)
                 achieved_rps[pid] = rps
+                # Throughput shortfall: deficit in tasks/second (used for ThroughputConstraintEvent).
                 excess = max(0.0, target_rps - rps)
-                d_excess[pid] = excess
+                throughput_shortfall[pid] = excess
+                # Delay excess: max(0, 1/achieved - 1/target) in seconds (dual update domain).
+                if rps > 0 and target_rps > 0:
+                    d_excess[pid] = max(0.0, 1.0 / rps - 1.0 / target_rps)
+                else:
+                    d_excess[pid] = 0.0
                 satisfied = rps >= target_rps
                 if not satisfied:
                     cumulative_violations[pid] += 1
@@ -1009,11 +1039,10 @@ class OptRunner:
                         run_id=run_id,
                         slot_id=slot_id,
                         pipeline_id=pid,
-                        task_id=slot_run_id,
                         target_rps=target_rps,
                         achieved_rps=rps,
                         satisfied=satisfied,
-                        violation_magnitude=excess,
+                        violation_magnitude=throughput_shortfall[pid],
                         cumulative_violations=cumulative_violations[pid],
                         sub_experiment_name=sub_exp_name,
                     )
@@ -1027,17 +1056,23 @@ class OptRunner:
                     if first_link
                     else 1.0
                 )
+                comp_method = (
+                    self._mapper.map(first_link.link_id, pid, comp_rate).method
+                    if first_link
+                    else "none"
+                )
                 self._emitter.emit(
                     TaskAccuracyEvent(
                         experiment_id=self._exp.name,
                         run_id=run_id,
                         pipeline_id=pid,
                         task_id=slot_run_id,
-                        compression_method="adapter",
+                        compression_method=comp_method,
                         compression_rate=comp_rate,
                         accuracy=acc,
                         n_samples=len(slot_result.per_pipeline_latency_ms.get(pid, [])),
                         slot_id=slot_id,
+                        sub_experiment_name=sub_exp_name,
                     )
                 )
 
@@ -1047,8 +1082,9 @@ class OptRunner:
                     run_id=run_id,
                     slot_id=slot_id,
                     eta_per_pipeline_per_link=eta_per_pipeline_per_link,
-                    lambda_per_task={},
+                    lambda_per_task=lambda_per_task,
                     d_excess_per_task=d_excess,
+                    throughput_shortfall_per_pipeline=throughput_shortfall,
                     c_hat_per_link=probe_bps,
                     optimizer_type=sub_exp_name,
                     solve_time_ms=solve_time_ms,

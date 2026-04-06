@@ -277,6 +277,11 @@ class NoCsiSubExperiment(BaseModel):
         stein_config: Stein gradient oracle hyperparameters.  Used when the
             accuracy model backend is stein_simulated.
         channel_estimator: Channel capacity estimator config.
+        bcd_iterations: Number of Block Coordinate Descent iterations J per slot
+            for the multi-task optimizer.  More iterations improve joint η/resource
+            convergence at the cost of additional SLSQP solves (and Stein oracle
+            calls when using stein_simulated backend).  Ignored for single-task
+            (NoCSISingleTaskOptimizer has no BCD loop).
     """
 
     type: Literal["no_csi"] = "no_csi"
@@ -287,26 +292,24 @@ class NoCsiSubExperiment(BaseModel):
     channel_estimator: ChannelEstimatorConfig = Field(
         default_factory=ChannelEstimatorConfig
     )
+    bcd_iterations: int = 10
 
 
 class CsiAwareSubExperiment(BaseModel):
     """CSI-aware optimizer: closed-form η* = clip(c_i / (R_k × a_i), eta_min, eta_max).
 
     Requires no accuracy model — optimal η is derived directly from the measured
-    link capacity and the throughput target.
+    link capacity and the throughput target.  Receives the raw probed c_t via
+    ``DirectCsiAdapter``; no channel estimator is used.
 
     Args:
         name: Sub-experiment name.
-        channel_estimator: Channel capacity estimator config.
         stein_config: Stein gradient oracle hyperparameters.  Used when the
             accuracy model backend is stein_simulated.
     """
 
     type: Literal["csi_aware"] = "csi_aware"
     name: str
-    channel_estimator: ChannelEstimatorConfig = Field(
-        default_factory=ChannelEstimatorConfig
-    )
     stein_config: SteinOracleConfig | None = None
 
 
@@ -345,19 +348,16 @@ class UniformCompressionSingleSubExperiment(BaseModel):
     """Single-task baseline: uniform η derived from instantaneous channel capacity.
 
     Sets the same η on every link: η = min(1, min_i c_i / (R * a_i)).
-    Requires a channel estimator to provide c_hat.
+    Receives the raw probed c_t via ``DirectCsiAdapter``; no channel estimator
+    is used.
     Corresponds to ``UniformCompressionSingleTaskBaseline``.
 
     Args:
         name: Sub-experiment name.
-        channel_estimator: Channel capacity estimator config.
     """
 
     type: Literal["uniform_compression_single"] = "uniform_compression_single"
     name: str
-    channel_estimator: ChannelEstimatorConfig = Field(
-        default_factory=ChannelEstimatorConfig
-    )
 
 
 class EstimatedCsiSingleSubExperiment(BaseModel):
@@ -416,53 +416,46 @@ class StaticEqualShareSubExperiment(BaseModel):
     """Multi-task baseline: static equal-share allocation with CSI-derived η.
 
     Splits s_comp and s_comm equally across co-located tasks.  η derived
-    from channel capacity and equal share.
+    from channel capacity and equal share.  Receives the raw probed c_t via
+    ``DirectCsiAdapter``; no channel estimator is used.
     Corresponds to ``StaticEqualShareMultiTaskBaseline``.
 
     Args:
         name: Sub-experiment name.
-        channel_estimator: Channel capacity estimator config.
     """
 
     type: Literal["static_equal_share"] = "static_equal_share"
     name: str
-    channel_estimator: ChannelEstimatorConfig = Field(
-        default_factory=ChannelEstimatorConfig
-    )
 
 
 class ProportionalResourceSubExperiment(BaseModel):
     """Multi-task baseline: proportional resource allocation (τ_k / a_k weighted).
 
+    Receives the raw probed c_t via ``DirectCsiAdapter``; no channel estimator
+    is used.
     Corresponds to ``ProportionalResourceAllocationMultiTaskBaseline``.
 
     Args:
         name: Sub-experiment name.
-        channel_estimator: Channel capacity estimator config.
     """
 
     type: Literal["proportional_resource"] = "proportional_resource"
     name: str
-    channel_estimator: ChannelEstimatorConfig = Field(
-        default_factory=ChannelEstimatorConfig
-    )
 
 
 class StrictPriorityGreedySubExperiment(BaseModel):
     """Multi-task baseline: strict priority greedy allocation by task weight w_k.
 
+    Receives the raw probed c_t via ``DirectCsiAdapter``; no channel estimator
+    is used.
     Corresponds to ``StrictPriorityGreedyMultiTaskBaseline``.
 
     Args:
         name: Sub-experiment name.
-        channel_estimator: Channel capacity estimator config.
     """
 
     type: Literal["strict_priority_greedy"] = "strict_priority_greedy"
     name: str
-    channel_estimator: ChannelEstimatorConfig = Field(
-        default_factory=ChannelEstimatorConfig
-    )
 
 
 class DecoupledDescentSubExperiment(BaseModel):

@@ -590,7 +590,10 @@ async def _process_task(state: MultiNodeState, item: QueueItem) -> float:
                     run_id=request.run_id,
                     request_id=request.task_id,
                     node=state.node_name,
+                    pipeline_id=request.pipeline_id,
                     method=ps.incoming.compression.value,
+                    input_bytes=len(raw_bytes),
+                    output_bytes=tensor.numel() * tensor.element_size(),
                     duration_ms=(time.perf_counter() - t0) * 1000,
                 )
             )
@@ -613,6 +616,7 @@ async def _process_task(state: MultiNodeState, item: QueueItem) -> float:
                 run_id=request.run_id,
                 request_id=request.task_id,
                 node=state.node_name,
+                pipeline_id=request.pipeline_id,
                 duration_ms=(time.perf_counter() - t0) * 1000,
                 device=state.device,
             )
@@ -653,6 +657,7 @@ async def _process_task(state: MultiNodeState, item: QueueItem) -> float:
                 run_id=request.run_id,
                 request_id=request.task_id,
                 node=state.node_name,
+                pipeline_id=request.pipeline_id,
                 method=ps.outgoing.compression.value,
                 rate=ps.outgoing.rate or 1.0,
                 input_bytes=input_bytes_size,
@@ -673,6 +678,7 @@ async def _process_task(state: MultiNodeState, item: QueueItem) -> float:
                 request_id=request.task_id,
                 from_node=state.node_name,
                 to_node=ps.next_node_name,
+                pipeline_id=request.pipeline_id,
                 payload_bytes=len(compressed),
                 duration_ms=(time.perf_counter() - t0) * 1000,
             )
@@ -821,7 +827,7 @@ async def _probe_loop(
             state.emitter.emit(
                 LinkProbeEvent(
                     experiment_id=state.last_experiment_id,
-                    run_id=state.last_run_id,
+                    run_id="background",
                     from_node=state.node_name,
                     to_node=next_node_name,
                     rtt_ms=rtt_ms,

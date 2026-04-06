@@ -301,18 +301,41 @@ def build_inference_tasks(
 
         # tau: global_node_idx → compute seconds
         tau_map = tau_per_node.get(pipeline_id, {})
+        if not tau_map:
+            logger.warning(
+                "build_inference_tasks: no profiling tau data for pipeline '%s' — "
+                "all nodes will use fallback τ=1e-3 s.  "
+                "Ensure the profiling sub-experiment ran successfully before this step.",
+                pipeline_id,
+            )
         tau: dict[int, float] = {}
         for node_name in flow:
             global_idx = node_to_idx[node_name]
+            if node_name not in tau_map:
+                logger.warning(
+                    "build_inference_tasks: no profiling tau for pipeline '%s' node '%s' — "
+                    "using fallback τ=1e-3 s.  Optimizer delay model will be inaccurate.",
+                    pipeline_id,
+                    node_name,
+                )
             tau[global_idx] = float(tau_map.get(node_name, 1e-3))
 
-        # a: global_link_idx → bytes; eta_min: global_link_idx → min ratio
+        # a: global_link_idx → bits.  c_t is in bps; for the delay formula
+        # a_i * eta_i / c_i(t) to yield seconds, a must be in bits.
+        # a_per_link_bytes holds the compressed payload size in bytes, so
+        # multiply by 8 to convert.
         a: dict[int, float] = {}
         eta_min: dict[int, float] = {}
         for i in range(len(flow) - 1):
             global_link_idx = node_to_idx[flow[i]]
             link_id = f"{flow[i]}-{flow[i + 1]}"
-            a[global_link_idx] = float(a_per_link_bytes.get(link_id, 1.0))
+            if link_id not in a_per_link_bytes:
+                logger.warning(
+                    "build_inference_tasks: no profiling activation size for link '%s' — "
+                    "using fallback a=8 bits.  Optimizer transmission delay will be inaccurate.",
+                    link_id,
+                )
+            a[global_link_idx] = float(a_per_link_bytes.get(link_id, 1.0)) * 8
             try:
                 lk_cfg = exp.link_for(flow[i], flow[i + 1])
                 eta_min[global_link_idx] = float(lk_cfg.eta_min)
@@ -601,6 +624,21 @@ class BaseOptimizerAdapter(ABC):
                 delay in seconds.
         """
 
+    def get_dual_variables(self) -> dict[str, float]:  # noqa: B027
+        """Return current dual variable λ_k for each pipeline.
+
+        Returns the lambda values that were used in the most recent ``step()``
+        call — i.e., before the next ``update_dual()`` advances them.  Only
+        meaningful for adapters that maintain a dual variable (subclasses of
+        ``DualEstimatedAdapter``).  Default returns an empty dict so callers
+        do not need to branch on adapter type.
+
+        Returns:
+            Mapping of pipeline_id → λ_k, or ``{}`` if this adapter type does
+            not maintain dual variables.
+        """
+        return {}
+
     def _extract(
         self, result: dict[int, dict[str, np.ndarray]] | None
     ) -> tuple[dict[str, dict[str, float]], dict[str, dict[str, float]], bool]:
@@ -788,25 +826,115 @@ class DualEstimatedAdapter(EstimatedAdapter):
         """
         self._optimizer.update_dual(t, actual_delays)
 
+    def get_dual_variables(self) -> dict[str, float]:
+        """Return current λ_k for each pipeline, keyed by pipeline_id.
+
+        Handles both single-task optimizers (``lambda_t: float``) and
+        multi-task optimizers (``lambda_k: dict[int, float]``).
+
+        Returns:
+            Mapping of pipeline_id → λ_k for all pipelines tracked by this
+            adapter.
+        """
+        opt = self._optimizer
+        if hasattr(opt, "lambda_k"):
+            return {
+                self._task_id_to_pipeline[tid]: float(lam)
+                for tid, lam in opt.lambda_k.items()
+                if tid in self._task_id_to_pipeline
+            }
+        if hasattr(opt, "lambda_t"):
+            # Single-task optimizer — exactly one pipeline.
+            pipeline_ids = list(self._task_id_to_pipeline.values())
+            if pipeline_ids:
+                return {pipeline_ids[0]: float(opt.lambda_t)}
+        return {}
+
 
 # ---------------------------------------------------------------------------
 # Internal estimator factory
 # ---------------------------------------------------------------------------
 
 
+class _LCBExternalEstimator:
+    """Per-link lower-confidence-bound estimator with the external estimator interface.
+
+    The external estimators in ``src.optimizers.estimators`` do not include an
+    LCB variant.  This class provides a compatible implementation:
+    ``estimate(t)`` returns ``max(0, mean - z * std)`` over the sliding window,
+    and ``update(c_t)`` accepts a per-link numpy vector.
+
+    Args:
+        num_links: Number of links (dimension of the c_t vector).
+        window: Sliding window length.
+        z: Confidence multiplier (mean − z·σ).
+        warmup_value: Value returned before any observations.
+    """
+
+    def __init__(
+        self,
+        num_links: int,
+        window: int,
+        z: float,
+        warmup_value: float,
+    ) -> None:
+        from collections import deque  # noqa: PLC0415
+
+        self._windows: list[deque[float]] = [
+            deque(maxlen=window) for _ in range(num_links)
+        ]
+        self._z = z
+        self._warmup = warmup_value
+
+    def update(self, c_t: np.ndarray) -> None:
+        """Record a new per-link capacity observation.
+
+        Args:
+            c_t: Per-link capacity vector of shape ``(num_links,)``.
+        """
+        for i, v in enumerate(c_t):
+            self._windows[i].append(float(v))
+
+    def estimate(self, t: int) -> np.ndarray:  # noqa: ARG002
+        """Return mean − z·σ per link over the current window.
+
+        Args:
+            t: Current slot index (unused; kept for interface compatibility).
+
+        Returns:
+            Per-link capacity estimate array of shape ``(num_links,)``.
+        """
+        import statistics  # noqa: PLC0415
+
+        result = []
+        for w in self._windows:
+            if len(w) == 0:
+                result.append(self._warmup)
+            elif len(w) == 1:
+                result.append(float(w[0]))
+            else:
+                mu = statistics.mean(w)
+                sigma = statistics.stdev(w)
+                result.append(max(0.0, mu - self._z * sigma))
+        return np.array(result, dtype=float)
+
+
 def _build_external_estimator(
     cfg: ChannelEstimatorConfig,
     num_links: int,
 ) -> Any:
-    """Build an external estimator from ``src.optimizers.estimators``.
+    """Build an external estimator for use inside an optimizer adapter.
+
+    The external estimators in ``src.optimizers.estimators`` expose
+    ``estimate(t) -> np.ndarray`` and ``update(c_t: np.ndarray)``.  For LCB,
+    a local implementation is used because the library does not provide one.
 
     Args:
         cfg: Channel estimator config from the sub-experiment.
         num_links: Number of links in the topology (vector size).
 
     Returns:
-        An external estimator instance with ``estimate(t)`` and ``update(c_t)``
-        methods.
+        An estimator instance with ``estimate(t)`` and ``update(c_t)`` methods.
     """
     warmup = float(cfg.warmup_value_bps)
 
@@ -819,10 +947,18 @@ def _build_external_estimator(
     if cfg.type == ChannelEstimatorType.RUNNING_MIN:
         return RunningMinEstimator(num_links=num_links, warmup_value=warmup)
 
-    if cfg.type in (ChannelEstimatorType.MOVING_AVG, ChannelEstimatorType.LCB):
+    if cfg.type == ChannelEstimatorType.MOVING_AVG:
         return MovingAverageEstimator(
             num_links=num_links,
             window=cfg.window_size,
+            warmup_value=warmup,
+        )
+
+    if cfg.type == ChannelEstimatorType.LCB:
+        return _LCBExternalEstimator(
+            num_links=num_links,
+            window=cfg.window_size or 20,
+            z=cfg.z or 1.0,
             warmup_value=warmup,
         )
 
@@ -896,7 +1032,11 @@ def build_adapter(
             )
         else:
             opt = NoCSIMultiTaskOptimizer(
-                M=M, tasks=inference_tasks, mu=actual_mu, epsilon=epsilon
+                M=M,
+                tasks=inference_tasks,
+                mu=actual_mu,
+                epsilon=epsilon,
+                J=sub_exp.bcd_iterations,
             )
         return DualEstimatedAdapter(optimizer=opt, estimator=estimator, **common)
 

@@ -28,6 +28,7 @@ sub_experiments:
   - name: no_csi_mu_sweep
     type: no_csi
     mu_sweep: [0.5, 1.0, 3.0, 10.0]
+    bcd_iterations: 10  # BCD iterations J per slot (multi-task only; ignored for single-task)
     stein_config:
       sigma: 0.05
       N: 50
@@ -48,13 +49,6 @@ sub_experiments:
       sigma: 0.05
       N: 50
       n_fast_samples: 128
-    channel_estimator:
-      type: lcb
-      window_size: 20
-      z: 1.5
-      history_source: metrics_server
-      # experiment_name_contains: injected by generator
-      warmup_value_bps: 1.0e8
 
   # -----------------------------------------------------------------------
   # Phase 4: Baselines (single-task)
@@ -67,10 +61,6 @@ sub_experiments:
 
   - name: uniform_compression_single
     type: uniform_compression_single
-    channel_estimator:
-      type: moving_average
-      window_size: 10
-      warmup_value_bps: 1.0e8
 
   - name: myopic_single
     type: estimated_csi_single
@@ -89,24 +79,12 @@ sub_experiments:
 
   - name: static_equal_share
     type: static_equal_share
-    channel_estimator:
-      type: moving_average
-      window_size: 10
-      warmup_value_bps: 1.0e8
 
   - name: proportional_resource
     type: proportional_resource
-    channel_estimator:
-      type: moving_average
-      window_size: 10
-      warmup_value_bps: 1.0e8
 
   - name: strict_priority_greedy
     type: strict_priority_greedy
-    channel_estimator:
-      type: moving_average
-      window_size: 10
-      warmup_value_bps: 1.0e8
 
   - name: decoupled_descent
     type: decoupled_descent

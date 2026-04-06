@@ -124,6 +124,7 @@ class LinkProber:
         slot_id: int | None,
         experiment_id: str,
         run_id: str,
+        sub_experiment_name: str | None = None,
     ) -> dict[str, float]:
         """Probe all configured links and update channel estimators.
 
@@ -142,6 +143,7 @@ class LinkProber:
             slot_id: Current optimization slot index (for event tagging).
             experiment_id: Experiment identifier for emitted events.
             run_id: Run identifier for emitted events.
+            sub_experiment_name: Active sub-experiment name for event tagging.
 
         Returns:
             Dict mapping ``link_id`` to the measured throughput in bps.
@@ -199,6 +201,8 @@ class LinkProber:
                         to_node=link.to_node,
                         rtt_ms=rtt_ms,
                         throughput_mbps=throughput_mbps,
+                        slot_id=slot_id,
+                        sub_experiment_name=sub_experiment_name,
                     )
                 )
 
@@ -219,6 +223,7 @@ class LinkProber:
                             relative_error=rel_err,
                             estimator_type=estimator.estimator_type,
                             n_observations=estimator.n_observations,
+                            sub_experiment_name=sub_experiment_name,
                         )
                     )
 

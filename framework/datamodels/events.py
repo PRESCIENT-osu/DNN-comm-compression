@@ -45,6 +45,7 @@ class ForwardPassEvent(BaseEvent):
 
     event_type: Literal[EventType.FORWARD_PASS] = EventType.FORWARD_PASS
     node: str
+    pipeline_id: str | None = None  # set on multi-model nodes; None for single-model
     duration_ms: float
     device: str
 
@@ -54,6 +55,7 @@ class CompressEvent(BaseEvent):
 
     event_type: Literal[EventType.COMPRESS] = EventType.COMPRESS
     node: str
+    pipeline_id: str | None = None  # set on multi-model nodes; None for single-model
     method: str
     rate: float
     input_bytes: int
@@ -66,7 +68,10 @@ class DecompressEvent(BaseEvent):
 
     event_type: Literal[EventType.DECOMPRESS] = EventType.DECOMPRESS
     node: str
+    pipeline_id: str | None = None  # set on multi-model nodes; None for single-model
     method: str
+    input_bytes: int  # compressed payload size received
+    output_bytes: int  # decompressed tensor size in bytes
     duration_ms: float
 
 
@@ -76,6 +81,7 @@ class SendEvent(BaseEvent):
     event_type: Literal[EventType.SEND] = EventType.SEND
     from_node: str
     to_node: str
+    pipeline_id: str | None = None  # set on multi-model nodes; None for single-model
     payload_bytes: int
     duration_ms: float
 
@@ -108,13 +114,22 @@ class EndToEndLatencyEvent(BaseEvent):
 
 
 class LinkProbeEvent(BaseEvent):
-    """Emitted by the background link prober between experiment runs."""
+    """Emitted by the background link prober or orchestrator during opt slots.
+
+    ``slot_id`` is set by the orchestrator-triggered prober (``None`` for the
+    node background prober).  ``run_id="background"`` marks background probes
+    that are not tied to a specific run.
+    """
 
     event_type: Literal[EventType.LINK_PROBE] = EventType.LINK_PROBE
     from_node: str
     to_node: str
     rtt_ms: float
     throughput_mbps: float | None = None
+    slot_id: int | None = (
+        None  # set by orchestrator prober; None for node background probes
+    )
+    sub_experiment_name: str | None = None
 
 
 class PipelineThroughputStats(BaseModel):
@@ -190,6 +205,10 @@ class RunThroughputEvent(BaseEvent):
     total_tasks: int
     tasks_per_second: float
     per_pipeline: dict[str, PipelineThroughputStats]
+    slot_id: int | None = (
+        None  # set during optimization loop; None for standalone multi-model sweeps
+    )
+    sub_experiment_name: str | None = None
 
 
 class SubExperimentEvent(BaseEvent):
@@ -222,6 +241,7 @@ class TaskAccuracyEvent(BaseEvent):
     accuracy: float  # top-1 for classification; negative perplexity for LM
     n_samples: int
     slot_id: int | None = None  # set during optimization loop; None for sweep runs
+    sub_experiment_name: str | None = None
 
 
 class OptSlotEvent(BaseEvent):
@@ -238,8 +258,15 @@ class OptSlotEvent(BaseEvent):
     eta_per_pipeline_per_link: dict[
         str, dict[str, float]
     ]  # pipeline_id → link_id → η chosen this slot
-    lambda_per_task: dict[str, float]  # task_id → dual variable λ_k
-    d_excess_per_task: dict[str, float]  # task_id → D_actual - 1/R_k (seconds)
+    lambda_per_task: dict[
+        str, float
+    ]  # pipeline_id → dual variable λ_k; {} for adapters with no dual update
+    d_excess_per_task: dict[
+        str, float
+    ]  # pipeline_id → max(0, 1/achieved_rps - 1/target_rps) in seconds; delay excess over target
+    throughput_shortfall_per_pipeline: dict[
+        str, float
+    ]  # pipeline_id → max(0, target_rps - achieved_rps) in tasks/second
     c_hat_per_link: dict[
         str, float
     ]  # link_id → channel estimate at decision time (bps)
@@ -265,12 +292,13 @@ class ThroughputConstraintEvent(BaseEvent):
     )
     slot_id: int
     pipeline_id: str
-    task_id: str
-    target_rps: float  # R_k configured for this pipeline
-    achieved_rps: float  # tasks completed this slot / slot wall time
+    target_rps: float  # R_k configured for this pipeline (tasks/second)
+    achieved_rps: float  # tasks completed this slot / slot wall time (tasks/second)
     satisfied: bool
-    violation_magnitude: float  # max(0, target - achieved) / target; 0 when satisfied
-    cumulative_violations: int  # count of violated slots since experiment start
+    violation_magnitude: (
+        float  # max(0, target_rps - achieved_rps) in tasks/second; 0 when satisfied
+    )
+    cumulative_violations: int  # count of violated slots since sub-experiment start
     sub_experiment_name: str | None = None
 
 

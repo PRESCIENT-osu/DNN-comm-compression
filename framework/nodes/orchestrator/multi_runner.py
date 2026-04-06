@@ -687,6 +687,8 @@ class MultiDataClient:
         run_id: str,
         node_host: str | None,
         emitter: MetricsEmitter,
+        slot_id: int | None = None,
+        sub_experiment_name: str | None = None,
     ) -> SlotResult:
         """Submit n_batches tasks for one optimization slot and collect results.
 
@@ -699,6 +701,8 @@ class MultiDataClient:
             run_id: Slot-scoped run identifier (used for event tagging).
             node_host: Optional node hostname override.
             emitter: Metrics emitter for TaskE2EEvent emission.
+            slot_id: Optimizer slot index; None for standalone multi-model sweeps.
+            sub_experiment_name: Active sub-experiment name; None for standalone sweeps.
 
         Returns:
             SlotResult with per-pipeline latencies and decoded results.
@@ -761,6 +765,33 @@ class MultiDataClient:
 
         await asyncio.gather(*all_tasks)
         wall_time_s = time.perf_counter() - wall_start
+
+        per_pipeline: dict[str, PipelineThroughputStats] = {}
+        total_tasks = 0
+        for pid, lats in latencies.items():
+            if lats:
+                sorted_lats = sorted(lats)
+                n = len(sorted_lats)
+                total_tasks += n
+                per_pipeline[pid] = PipelineThroughputStats(
+                    tasks=n,
+                    tasks_per_second=n / wall_time_s if wall_time_s > 0 else 0.0,
+                    p50_ms=sorted_lats[int(n * 0.50)],
+                    p90_ms=sorted_lats[int(n * 0.90)],
+                    p99_ms=sorted_lats[min(int(n * 0.99), n - 1)],
+                )
+        emitter.emit(
+            RunThroughputEvent(
+                experiment_id=exp.name,
+                run_id=run_id,
+                wall_time_s=wall_time_s,
+                total_tasks=total_tasks,
+                tasks_per_second=total_tasks / wall_time_s if wall_time_s > 0 else 0.0,
+                per_pipeline=per_pipeline,
+                slot_id=slot_id,
+                sub_experiment_name=sub_experiment_name,
+            )
+        )
 
         return SlotResult(
             per_pipeline_latency_ms=latencies,

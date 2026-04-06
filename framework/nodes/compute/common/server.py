@@ -288,6 +288,8 @@ async def _process_inference(state: NodeState, request: InferRequest) -> None:
                     request_id=request.task_id,
                     node=state.node_name,
                     method=state.incoming_method.value,
+                    input_bytes=len(raw_bytes),
+                    output_bytes=tensor.numel() * tensor.element_size(),
                     duration_ms=(time.perf_counter() - t0) * 1000,
                 )
             )
