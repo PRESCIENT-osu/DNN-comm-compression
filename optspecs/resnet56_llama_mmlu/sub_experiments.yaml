@@ -21,37 +21,55 @@ sub_experiments:
 
   # -----------------------------------------------------------------------
   # Phase 2: Accuracy model training
-  # Trains a surrogate A_k(η) for each pipeline.
-  # Queries the metrics server for existing (η, accuracy) records first;
-  # if fewer than min_samples are found, runs a targeted sweep at sweep_rates.
+  # Trains a surrogate A_k(η) for each pipeline via simulation-based sweep.
+  # Uses a separate dataset slice (different seed) from the main inference
+  # tasks to prevent data leakage.
   # -----------------------------------------------------------------------
   - name: accuracy_model_resnet
     type: accuracy_model
     pipeline_id: resnet-a
-    backend: surrogate
-    model_type: poly3
-    history_source: metrics_server
-    min_samples: 50
-    sweep_rates: [0.1, 0.2, 0.3, 0.5, 0.7, 0.8, 1.0]
+    model_type: gbm
+    sweep_design: random
+    n_sweep_samples: 60
+    dataset:
+      name: cifar10
+      path: .datasets/cifar10
+      batch_size: 100
+      max_samples: 100
+      seed: 100
 
   - name: accuracy_model_llama
     type: accuracy_model
     pipeline_id: llama-mmlu-a
-    backend: surrogate
-    model_type: poly3
-    history_source: metrics_server
-    min_samples: 30
-    sweep_rates: [0.2, 0.4, 0.6, 0.8, 1.0]
+    model_type: gbm
+    sweep_design: random
+    n_sweep_samples: 60
+    dataset:
+      name: mmlu
+      path: .datasets/mmlu
+      tokenizer_path: models/llama/.partitions/tokenizer
+      batch_size: 4
+      subjects:
+        - college_computer_science
+        - high_school_mathematics
+        - professional_law
+        - global_facts
+        - miscellaneous
+        - business_ethics
+      samples_per_subject: 4
+      seed: 101
 
   # -----------------------------------------------------------------------
   # Phase 3: No-CSI optimizer sweep over μ values
   # Each μ in mu_sweep produces one independent optimization run.
-  # Uses the surrogate models trained above.
+  # Uses the surrogate models trained above for both pipelines.
   # -----------------------------------------------------------------------
   - name: no_csi_mu_sweep
     type: no_csi
     mu_sweep: [0.5, 1.0, 3.0, 10.0]
-    accuracy_model_ref: accuracy_model_resnet
+    accuracy_model_refs:
+      - accuracy_model_resnet
+      - accuracy_model_llama
     bcd_iterations: 10  # BCD iterations J per slot (multi-task only; ignored for single-task)
     channel_estimator:
       type: moving_average

@@ -34,7 +34,8 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-import numpy as np  # noqa: F401
+import numpy as np
+import torch
 
 from framework.datamodels.api import MultiConfigUpdate
 from framework.datamodels.events import (
@@ -46,7 +47,6 @@ from framework.datamodels.events import (
 from framework.datamodels.experiment import CompressionMethod
 from framework.datamodels.opt_experiment import (
     AccuracyModelSubExperiment,
-    ChannelEstimatorHistorySource,
     CsiAwareSubExperiment,  # noqa: F401
     DecoupledDescentSubExperiment,  # noqa: F401
     EstimatedCsiSingleSubExperiment,  # noqa: F401
@@ -566,75 +566,54 @@ class OptRunner:
     # ------------------------------------------------------------------
 
     async def _run_accuracy_model(self, sub_exp: AccuracyModelSubExperiment) -> None:
-        """Train or reload the accuracy surrogate model A_k(η) for one pipeline.
+        """Train a surrogate accuracy model A_k(η) for one pipeline via simulation sweep.
 
-        For the surrogate backend:
-          1. Check the metrics server for existing (η, accuracy) records.
-          2. If fewer than min_samples found, run a targeted sweep at sweep_rates.
-          3. Fit the model and write to the artifact store.
-
-        For the stein_simulated backend:
-          The Stein oracle is built on-demand in each optimization sub-experiment
-          via ``build_simulations`` + ``build_inference_tasks``.  No training
-          artifact is produced here — this phase is a no-op and returns immediately.
-
-        The artifact is reused across restarts if its config hash matches.
+        1. Compute a config hash that includes compression scheme so cached
+           artifacts are invalidated when the compression method changes.
+        2. Return early if a valid cached artifact (pkl + metadata json) exists.
+        3. Otherwise run ``_run_accuracy_sweep_simulated`` to generate
+           (η_vector, accuracy) pairs via the pipeline's simulation.
+        4. Fit a ``SurrogateAccuracyModel`` and persist it.
 
         Args:
             sub_exp: Accuracy model sub-experiment config.
         """
-        from framework.datamodels.opt_experiment import (
-            AccuracyModelBackend,  # noqa: PLC0415
-        )
+        pipeline = self._exp.pipeline_for(sub_exp.pipeline_id)
+        pipeline_links = self._pipeline_links(pipeline.flow)
 
-        if sub_exp.backend == AccuracyModelBackend.STEIN_SIMULATED:
-            logger.info(
-                "[%s] stein_simulated backend — Stein oracle built per sub-experiment; "
-                "no accuracy model artifact needed",
-                sub_exp.name,
-            )
-            return
+        # Include compression scheme in the config hash so cached models are
+        # invalidated when the mapper's method changes for this pipeline.
+        compression_method_per_link = {
+            lk.link_id: self._mapper.map(
+                lk.link_id, sub_exp.pipeline_id, lk.eta_min
+            ).method
+            for lk in pipeline_links
+        }
 
-        artifact_path = self._artifacts.accuracy_model_path(
+        base_path = self._artifacts.accuracy_model_path(
             sub_exp.pipeline_id, sub_exp.name
         )
+        pkl_path = base_path.with_suffix(".pkl")
+        meta_path = base_path.with_suffix(".json")
+
         config_hash = self._artifacts.config_hash(
             {
                 "pipeline_id": sub_exp.pipeline_id,
                 "model_type": sub_exp.model_type,
-                "sweep_rates": sub_exp.sweep_rates,
+                "sweep_design": sub_exp.sweep_design,
+                "n_sweep_samples": sub_exp.n_sweep_samples,
+                "compression_method_per_link": compression_method_per_link,
             }
         )
 
-        if self._artifacts.is_valid(artifact_path, config_hash):
+        if self._artifacts.is_valid(meta_path, config_hash) and pkl_path.exists():
             logger.info("[%s] Reusing cached accuracy model artifact", sub_exp.name)
             self._load_accuracy_model_from_artifact(sub_exp)
             return
 
-        samples: list[tuple[float, float]] = []
+        X, y = await self._run_accuracy_sweep_simulated(sub_exp, pipeline_links)
 
-        if sub_exp.history_source == ChannelEstimatorHistorySource.METRICS_SERVER:
-            samples = await self._query_accuracy_samples(
-                sub_exp.pipeline_id,
-                experiment_name_contains=self._exp.name,
-            )
-            logger.info(
-                "[%s] Found %d existing accuracy records from metrics server",
-                sub_exp.name,
-                len(samples),
-            )
-
-        if len(samples) < sub_exp.min_samples:
-            logger.info(
-                "[%s] Insufficient samples (%d < %d); running accuracy sweep",
-                sub_exp.name,
-                len(samples),
-                sub_exp.min_samples,
-            )
-            sweep_samples = await self._run_accuracy_sweep(sub_exp)
-            samples.extend(sweep_samples)
-
-        if not samples:
+        if not X:
             logger.warning(
                 "[%s] No accuracy samples collected; accuracy model unavailable",
                 sub_exp.name,
@@ -642,190 +621,204 @@ class OptRunner:
             return
 
         model = build_accuracy_model(sub_exp.model_type)
-        model.fit(samples)
+        model.fit(np.array(X), np.array(y))
 
-        from framework.optimizer.accuracy_model import (
-            SurrogateAccuracyModel,  # noqa: PLC0415
+        # Persist: pickle for the model, JSON for the config hash.
+        model.save(pkl_path)
+        self._artifacts.write_json(
+            meta_path,
+            {"pipeline_id": sub_exp.pipeline_id, "model_type": sub_exp.model_type},
+            config_hash,
         )
-
-        model_dict: dict[str, Any] = {
-            "model_type": sub_exp.model_type,
-            "pipeline_id": sub_exp.pipeline_id,
-        }
-        if isinstance(model, SurrogateAccuracyModel):
-            model_dict.update(model.to_dict())
-
-        self._artifacts.write_json(artifact_path, model_dict, config_hash)
         logger.info(
             "[%s] Accuracy model fitted: pipeline=%s samples=%d",
             sub_exp.name,
             sub_exp.pipeline_id,
-            len(samples),
+            len(y),
         )
-
-        # Cache in-memory.
         self._accuracy_models.setdefault(sub_exp.name, {})[sub_exp.pipeline_id] = model
 
-    async def _query_accuracy_samples(
-        self,
-        pipeline_id: str,
-        experiment_name_contains: str | None = None,
-        limit: int = 1000,
-    ) -> list[tuple[float, float]]:
-        """Query the metrics server for existing (η, accuracy) records.
-
-        Args:
-            pipeline_id: Pipeline to filter on.
-            experiment_name_contains: Optional substring filter for experiment names.
-            limit: Maximum records to fetch.
-
-        Returns:
-            List of (compression_rate, accuracy) tuples.
-        """
-        params: dict[str, str] = {
-            "event_type": "task_accuracy",
-            "pipeline_id": pipeline_id,
-            "limit": str(limit),
-        }
-        if experiment_name_contains:
-            params["experiment_name_contains"] = experiment_name_contains
-
-        try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                resp = await client.get(
-                    f"{self._metrics_url}/metrics/query", params=params
-                )
-                resp.raise_for_status()
-                data = resp.json()
-        except Exception as exc:
-            logger.warning(
-                "Could not query accuracy records for pipeline '%s': %s",
-                pipeline_id,
-                exc,
-            )
-            return []
-
-        samples: list[tuple[float, float]] = []
-        for event in data.get("events", []):
-            rate = event.get("compression_rate")
-            acc = event.get("accuracy")
-            if rate is not None and acc is not None:
-                samples.append((float(rate), float(acc)))
-        return samples
-
-    async def _run_accuracy_sweep(
+    async def _run_accuracy_sweep_simulated(
         self,
         sub_exp: AccuracyModelSubExperiment,
-    ) -> list[tuple[float, float]]:
-        """Run a targeted inference sweep at each rate in sweep_rates.
+        pipeline_links: list[Any],
+    ) -> tuple[list[list[float]], list[float]]:
+        """Generate (η_vector, accuracy) training pairs via simulation.
 
-        For each η value, pushes config to all links for the target pipeline,
-        runs one slot of inference, and records the observed accuracy.
+        Samples ``n_sweep_samples`` η vectors according to ``sweep_design``,
+        evaluates each via the pipeline's simulation object (loaded from
+        ``simulation_path``), and emits a ``TaskAccuracyEvent`` per sample.
 
         Args:
             sub_exp: Accuracy model sub-experiment config.
+            pipeline_links: List of ``OptLinkConfig`` for this pipeline's links,
+                in flow order.
 
         Returns:
-            List of (η, accuracy) tuples from the sweep.
+            Tuple of (X, y) where X is a list of η-vectors and y is a list of
+            accuracy scalars.
         """
-        samples: list[tuple[float, float]] = []
-        loop_cfg = self._exp.optimization_loop
+        from framework.optimizer.simulation_factory import (  # noqa: PLC0415
+            build_simulations,
+        )
 
-        for eta in sub_exp.sweep_rates:
-            pipeline_ids = [p.name for p in self._exp.pipelines]
-            eta_uniform = {
-                pid: {lk.link_id: eta for lk in self._exp.links} for pid in pipeline_ids
-            }
-            await push_opt_slot_config(
-                eta_uniform,
-                self._exp,
-                self._mapper,
-                self._node_host,
-                _CONFIG_DRAIN_TIMEOUT_S,
+        model_key = self._exp.pipeline_for(sub_exp.pipeline_id).model.lower()
+        dataset_override = {model_key: sub_exp.dataset}
+        simulations = build_simulations(
+            self._exp,
+            stein_cfg=None,
+            mapper=self._mapper,
+            dataset_override=dataset_override,
+        )
+        sim = simulations.get(sub_exp.pipeline_id)
+        if sim is None:
+            logger.warning(
+                "[%s] No simulation available for pipeline '%s'; "
+                "cannot train accuracy model — set simulation_path in the pipeline config",
+                sub_exp.name,
+                sub_exp.pipeline_id,
             )
+            return [], []
 
-            run_id = f"{self._exp.name}_{sub_exp.name}_sweep_eta{eta:.2f}"
-            slot_result = await self._data_client.run_slot(
-                n_batches=loop_cfg.batches_per_slot,
-                run_id=run_id,
-                node_host=self._node_host,
-                emitter=self._emitter,
+        n_links = len(pipeline_links)
+        eta_min_vec = np.array([lk.eta_min for lk in pipeline_links])
+        eta_max_vec = np.array([lk.eta_max for lk in pipeline_links])
+        link_ids = [lk.link_id for lk in pipeline_links]
+
+        rng = np.random.default_rng(42)
+        if sub_exp.sweep_design == "diagonal":
+            scalars = np.linspace(0.0, 1.0, sub_exp.n_sweep_samples)
+            eta_samples = eta_min_vec + scalars[:, None] * (eta_max_vec - eta_min_vec)
+        else:  # random
+            u = rng.random((sub_exp.n_sweep_samples, n_links))
+            eta_samples = eta_min_vec + u * (eta_max_vec - eta_min_vec)
+
+        X: list[list[float]] = []
+        y: list[float] = []
+
+        for i, eta_vec in enumerate(eta_samples):
+            try:
+                acc = float(sim.accuracy(torch.tensor(eta_vec, dtype=torch.float32)))
+            except Exception as exc:
+                logger.warning(
+                    "[%s] Simulation failed for sample %d: %s", sub_exp.name, i, exc
+                )
+                continue
+
+            X.append(eta_vec.tolist())
+            y.append(acc)
+
+            eta_per_link = dict(zip(link_ids, eta_vec.tolist(), strict=False))
+            first_link = pipeline_links[0] if pipeline_links else None
+            comp_method = (
+                self._mapper.map(
+                    first_link.link_id, sub_exp.pipeline_id, float(eta_vec[0])
+                ).method
+                if first_link
+                else "topk"
             )
-
-            acc = slot_result.accuracy(sub_exp.pipeline_id)
-            samples.append((eta, acc))
-
-            # Emit TaskAccuracyEvent so future runs can reuse these records.
+            run_id = f"{self._exp.name}_{sub_exp.name}_sweep_{i}"
             self._emitter.emit(
                 TaskAccuracyEvent(
                     experiment_id=self._exp.name,
                     run_id=run_id,
                     pipeline_id=sub_exp.pipeline_id,
                     task_id=f"{run_id}_agg",
-                    compression_method="topk",
-                    compression_rate=eta,
+                    compression_method=comp_method,
+                    compression_rate=float(np.mean(eta_vec)),
                     accuracy=acc,
-                    n_samples=len(
-                        slot_result.per_pipeline_latency_ms.get(sub_exp.pipeline_id, [])
-                    ),
+                    n_samples=sub_exp.dataset.batch_size,
+                    eta_per_link=eta_per_link,
                     sub_experiment_name=sub_exp.name,
                 )
             )
-            logger.debug("[%s] Sweep η=%.2f → accuracy=%.4f", sub_exp.name, eta, acc)
+            logger.debug(
+                "[%s] Sample %d/%d: η=%s → accuracy=%.4f",
+                sub_exp.name,
+                i + 1,
+                sub_exp.n_sweep_samples,
+                [f"{v:.3f}" for v in eta_vec],
+                acc,
+            )
 
-        return samples
+        try:
+            sim.remove_hooks()
+        except Exception:
+            pass
+
+        return X, y
+
+    def _pipeline_links(self, flow: list[str]) -> list[Any]:
+        """Return the OptLinkConfig objects for consecutive node pairs in ``flow``.
+
+        Args:
+            flow: Ordered list of node names for a pipeline.
+
+        Returns:
+            List of matching OptLinkConfig objects in flow order.
+        """
+        link_map = {(lk.from_node, lk.to_node): lk for lk in self._exp.links}
+        result = []
+        for i in range(len(flow) - 1):
+            lk = link_map.get((flow[i], flow[i + 1]))
+            if lk is not None:
+                result.append(lk)
+        return result
 
     def _load_accuracy_model_from_artifact(
         self, sub_exp: AccuracyModelSubExperiment
     ) -> None:
-        """Restore an accuracy model from its artifact file into the in-memory cache.
+        """Restore an accuracy model from its pickle artifact into the in-memory cache.
 
         Args:
             sub_exp: Accuracy model sub-experiment config.
         """
         from framework.optimizer.accuracy_model import (
-            SurrogateAccuracyModel,  # noqa: PLC0415
+            load_accuracy_model,  # noqa: PLC0415
         )
 
-        artifact_path = self._artifacts.accuracy_model_path(
+        base_path = self._artifacts.accuracy_model_path(
             sub_exp.pipeline_id, sub_exp.name
         )
+        pkl_path = base_path.with_suffix(".pkl")
         try:
-            data = self._artifacts.read_json(artifact_path)
+            model = load_accuracy_model(pkl_path)
         except Exception as exc:
             logger.warning(
-                "[%s] Could not load accuracy model artifact: %s", sub_exp.name, exc
+                "[%s] Could not load accuracy model artifact %s: %s",
+                sub_exp.name,
+                pkl_path,
+                exc,
             )
             return
-
-        model_type = data.get("model_type", "poly3")
-        if model_type.startswith("poly"):
-            model = SurrogateAccuracyModel.from_dict(data)
-        else:
-            model = build_accuracy_model(model_type)
-
         self._accuracy_models.setdefault(sub_exp.name, {})[sub_exp.pipeline_id] = model
 
     def _resolve_accuracy_models(
-        self, accuracy_model_ref: str
+        self, accuracy_model_refs: list[str] | None
     ) -> dict[str, AccuracyModel]:
-        """Look up accuracy models by sub-experiment reference name.
+        """Merge accuracy models from multiple AccuracyModelSubExperiment references.
 
-        Falls back to a ConstantAccuracyModel(1.0) for any pipeline not covered.
+        Each reference covers one pipeline (determined by the sub-experiment's
+        ``pipeline_id``).  Falls back to ``ConstantAccuracyModel(1.0)`` for any
+        pipeline not covered by the provided references.
 
         Args:
-            accuracy_model_ref: Name of the AccuracyModelSubExperiment to use.
+            accuracy_model_refs: Names of AccuracyModelSubExperiments to merge.
+                ``None`` or empty list → all pipelines get the constant fallback.
 
         Returns:
-            Dict of pipeline_id → AccuracyModel.
+            Dict of ``pipeline_id → AccuracyModel``.
         """
-        from framework.optimizer.accuracy_model import (
-            ConstantAccuracyModel,  # noqa: PLC0415
+        from framework.optimizer.accuracy_model import (  # noqa: PLC0415
+            ConstantAccuracyModel,
         )
 
-        cached = self._accuracy_models.get(accuracy_model_ref, {})
+        merged: dict[str, AccuracyModel] = {}
+        for ref in accuracy_model_refs or []:
+            merged.update(self._accuracy_models.get(ref, {}))
+
         return {
-            pid: cached.get(pid, ConstantAccuracyModel()) for pid in self._pipeline_ids
+            pid: merged.get(pid, ConstantAccuracyModel()) for pid in self._pipeline_ids
         }
 
     # ------------------------------------------------------------------
@@ -856,13 +849,22 @@ class OptRunner:
                 build_simulations,
             )
 
-            simulations = build_simulations(self._exp, stein_cfg, self._mapper)
+            simulations = build_simulations(
+                self._exp,
+                stein_cfg,
+                self._mapper,
+                dataset_override=self._exp.stein_datasets,
+            )
             if not simulations:
                 logger.warning(
                     "[%s] stein_config is set but no pipelines have simulation_path; "
                     "falling back to dummy accuracy callables",
                     sub_exp.name,
                 )
+
+        # Resolve surrogate accuracy models for sub-experiments that reference them.
+        accuracy_model_refs = getattr(sub_exp, "accuracy_model_refs", None)
+        accuracy_models = self._resolve_accuracy_models(accuracy_model_refs)
 
         inference_tasks, task_id_to_pipeline, pipeline_to_task_id = (
             build_inference_tasks(
@@ -872,6 +874,7 @@ class OptRunner:
                 global_order=global_order,
                 simulations=simulations,
                 stein_cfg=stein_cfg,
+                accuracy_models=accuracy_models,
             )
         )
 

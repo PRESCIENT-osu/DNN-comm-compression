@@ -59,6 +59,30 @@ datasets:
     samples_per_subject: 20
     seed: 42
 
+# Dataset slices used exclusively by the Stein oracle during optimization.
+# Different seeds ensure minimal overlap with the main inference task dataset.
+stein_datasets:
+  resnet:
+    name: cifar10
+    path: .datasets/cifar10
+    batch_size: 100
+    max_samples: 512
+    seed: 200
+  llama:
+    name: mmlu
+    path: .datasets/mmlu
+    tokenizer_path: models/llama/.partitions/tokenizer
+    batch_size: 4
+    subjects:
+      - college_computer_science
+      - high_school_mathematics
+      - professional_law
+      - global_facts
+      - miscellaneous
+      - business_ethics
+    samples_per_subject: 10
+    seed: 201
+
 workload:
   pattern: fill
   window_per_pipeline: 4

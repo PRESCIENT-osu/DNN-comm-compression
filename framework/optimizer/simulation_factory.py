@@ -250,6 +250,7 @@ def build_simulations(
     exp: GeneratedOptExperimentConfig,
     stein_cfg: SteinOracleConfig | None = None,
     mapper: Any | None = None,
+    dataset_override: dict[str, DatasetConfig] | None = None,
 ) -> dict[str, Any]:
     """Build simulation pipeline objects for all pipelines with ``simulation_path`` set.
 
@@ -266,6 +267,11 @@ def build_simulations(
             build per-link ``compress_fns`` that match the deployed compressor
             scheme.  If ``None``, simulation pipelines default to per-sample
             top-k for all links.
+        dataset_override: When provided, replaces ``exp.datasets`` for dataset
+            lookups.  Use this to pass accuracy-model sweep datasets or Stein
+            oracle datasets so that each evaluation role uses its own data
+            slice.  For Llama, the full_evaluator is capped at
+            ``cfg.max_samples`` (not None) when an override is supplied.
 
     Returns:
         Dict mapping ``pipeline.name → simulation object``
@@ -278,6 +284,7 @@ def build_simulations(
         SimulatedResNetPipeline,
     )
 
+    datasets = dataset_override if dataset_override is not None else exp.datasets
     result: dict[str, Any] = {}
 
     for pipeline in exp.pipelines:
@@ -293,7 +300,7 @@ def build_simulations(
         )
 
         if model_key in _MODEL_RESNET:
-            cfg = exp.datasets.get("resnet")
+            cfg = datasets.get("resnet")
             if cfg is None:
                 logger.warning(
                     "Pipeline '%s' has simulation_path but no 'resnet' dataset config",
@@ -316,7 +323,7 @@ def build_simulations(
             )
 
         elif model_key in _MODEL_LLAMA:
-            cfg = exp.datasets.get("llama")
+            cfg = datasets.get("llama")
             if cfg is None:
                 logger.warning(
                     "Pipeline '%s' has simulation_path but no 'llama' dataset config",
@@ -336,7 +343,13 @@ def build_simulations(
             fast_evaluator = _MMLULocalEvaluator(
                 cfg, tokenizer_path, max_items=fast_max
             )
-            full_evaluator = _MMLULocalEvaluator(cfg, tokenizer_path, max_items=None)
+            # When a dataset override is in effect (accuracy model sweep or Stein
+            # oracle datasets), cap the full evaluator at cfg.max_samples so we
+            # don't accidentally run the entire dataset on every oracle call.
+            full_max = cfg.max_samples if dataset_override is not None else None
+            full_evaluator = _MMLULocalEvaluator(
+                cfg, tokenizer_path, max_items=full_max
+            )
 
             sim = SimulatedLlamaPipeline(
                 model_name=pipeline.simulation_path,

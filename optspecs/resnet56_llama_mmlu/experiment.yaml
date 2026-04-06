@@ -17,6 +17,7 @@ pipelines:
       B: [p2, p3]
       C: [p4, p5]
     flow: [A, B, C]
+    simulation_path: models/resnet/resnet56.th
 
   - name: llama-mmlu-a
     model: llama
@@ -25,6 +26,7 @@ pipelines:
       B: [p2]
       C: [p3]
     flow: [A, B, C]
+    simulation_path: models/llama/llama-3.1-8b
 
 datasets:
   resnet:

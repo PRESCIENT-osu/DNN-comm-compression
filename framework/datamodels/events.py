@@ -237,9 +237,12 @@ class TaskAccuracyEvent(BaseEvent):
     pipeline_id: str
     task_id: str
     compression_method: str
-    compression_rate: float  # η scalar summary; use OptSlotEvent for per-link vector
+    compression_rate: float  # η scalar summary (mean across links)
     accuracy: float  # top-1 for classification; negative perplexity for LM
     n_samples: int
+    eta_per_link: dict[str, float] | None = (
+        None  # link_id → η; set during accuracy_model sweeps
+    )
     slot_id: int | None = None  # set during optimization loop; None for sweep runs
     sub_experiment_name: str | None = None
 

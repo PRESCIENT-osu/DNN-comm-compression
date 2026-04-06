@@ -249,11 +249,21 @@ def build_inference_tasks(
     global_order: list[str],
     simulations: dict[str, Any] | None = None,
     stein_cfg: SteinOracleConfig | None = None,
+    accuracy_models: dict[str, Any] | None = None,
 ) -> tuple[list[InferenceTask], dict[int, str], dict[str, int]]:
     """Build an ``InferenceTask`` for each pipeline in the experiment.
 
     Pipelines are sorted by name for a stable task_id assignment: the
     i-th pipeline in sorted order gets ``task_id = i``.
+
+    Callable selection priority per pipeline:
+
+    1. **Stein oracle** — when ``simulations[pipeline_id]`` exists and
+       ``stein_cfg`` is not None.  Real gradient via antithetic perturbation.
+    2. **Surrogate** — when ``accuracy_models[pipeline_id]`` is a fitted
+       ``AccuracyModel``.  Gradient via central finite differences.
+    3. **Dummy** — constant 1.0 / zero gradient.  Used for CSI-aware and
+       baseline adapters that never call the accuracy function.
 
     Args:
         exp: Generated experiment config.
@@ -265,6 +275,9 @@ def build_inference_tasks(
             When provided and ``stein_cfg`` is set, real accuracy/gradient callables
             are installed.  Otherwise, dummy callables are used.
         stein_cfg: Stein oracle config.  Required when ``simulations`` is not None.
+        accuracy_models: Optional map of pipeline_id → fitted ``AccuracyModel``.
+            When provided and no Stein oracle is available for a pipeline, the
+            surrogate callables are installed via ``make_surrogate_callables``.
 
     Returns:
         Tuple of:
@@ -354,9 +367,12 @@ def build_inference_tasks(
 
         w_k = float(task_cfg.task_weight)
 
-        # Accuracy / gradient callables
+        # Accuracy / gradient callables — three-way priority selection.
         simulation = (simulations or {}).get(pipeline_id)
+        accuracy_model = (accuracy_models or {}).get(pipeline_id)
+
         if simulation is not None and stein_cfg is not None:
+            # Priority 1: Stein oracle via simulation.
             try:
                 from models.llama.simulation.pipeline import (  # noqa: PLC0415
                     SimulatedLlamaPipeline,
@@ -369,7 +385,23 @@ def build_inference_tasks(
             acc_fn, acc_true_fn, grad_fn = _make_stein_callables(
                 simulation, L_k - 1, stein_cfg, is_llama
             )
+        elif accuracy_model is not None and accuracy_model.is_fitted:
+            # Priority 2: Fitted surrogate accuracy model.
+            from framework.optimizer.accuracy_model import (  # noqa: PLC0415
+                make_surrogate_callables,
+            )
+
+            acc_fn, acc_true_fn, grad_fn = make_surrogate_callables(
+                accuracy_model, L_k - 1
+            )
+            logger.debug(
+                "build_inference_tasks: pipeline '%s' using surrogate accuracy model "
+                "(type=%s)",
+                pipeline_id,
+                accuracy_model.model_type,
+            )
         else:
+            # Priority 3: Dummy callables (CSI-aware / baseline adapters).
             acc_fn, acc_true_fn, grad_fn = _dummy_callables()
 
         inference_tasks.append(

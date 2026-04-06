@@ -121,6 +121,7 @@ pipelines:
       B: [p2, p3]
       C: [p4, p5]
     flow: [A, B, C]
+    simulation_path: models/resnet/resnet56.th   # required for accuracy_model and Stein oracle
 
   - name: llama-mmlu-a
     model: llama
@@ -129,8 +130,9 @@ pipelines:
       B: [p2]
       C: [p3]
     flow: [A, B, C]
+    simulation_path: models/llama/llama-3.1-8b   # required for accuracy_model and Stein oracle
 
-datasets:
+datasets:                  # used by actual inference tasks (seed: 42)
   resnet:
     name: cifar10
     path: .datasets/cifar10
@@ -147,6 +149,24 @@ datasets:
     subjects: [college_computer_science, high_school_mathematics]
     samples_per_subject: 20
     seed: 42
+
+# Required when any sub-experiment uses stein_config.
+# Different seeds prevent data overlap with `datasets` and accuracy model datasets.
+stein_datasets:
+  resnet:
+    name: cifar10
+    path: .datasets/cifar10
+    batch_size: 100
+    max_samples: 512
+    seed: 200
+  llama:
+    name: mmlu
+    path: .datasets/mmlu
+    tokenizer_path: models/llama/.partitions/tokenizer
+    batch_size: 4
+    subjects: [college_computer_science, high_school_mathematics]
+    samples_per_subject: 10
+    seed: 201
 
 workload:
   pattern: fill
@@ -220,6 +240,47 @@ metrics_server:
 
 Sub-experiments are executed **in order**. Later sub-experiments may depend on artifacts from earlier ones. The file must always begin with a `profiling` sub-experiment.
 
+Surrogate variant (accuracy model trained via simulation sweep, then used by optimizer):
+
+```yaml
+sub_experiments:
+  - name: profiling
+    type: profiling
+
+  - name: accuracy_model_resnet
+    type: accuracy_model
+    pipeline_id: resnet-a
+    model_type: gbm
+    sweep_design: random
+    n_sweep_samples: 60
+    dataset:
+      name: cifar10
+      path: .datasets/cifar10
+      batch_size: 100
+      max_samples: 100
+      seed: 100
+
+  - name: no_csi_mu_sweep
+    type: no_csi
+    mu_sweep: [0.5, 1.0, 3.0, 10.0]
+    accuracy_model_refs: [accuracy_model_resnet]
+    channel_estimator:
+      type: moving_average
+      window_size: 10
+      warmup_value_bps: 1.0e8
+
+  - name: max_compression_single
+    type: max_compression_single
+
+  - name: historical_average_ce
+    type: historical_average_ce
+    channel_estimator:
+      type: mean
+      warmup_value_bps: 1.0e8
+```
+
+Stein oracle variant (A_k(η) evaluated on-the-fly; `stein_datasets` must be set in `experiment.yaml`):
+
 ```yaml
 sub_experiments:
   - name: profiling
@@ -243,20 +304,6 @@ sub_experiments:
       sigma: 0.05
       N: 50
       n_fast_samples: 512
-    channel_estimator:
-      type: lcb
-      window_size: 20
-      z: 1.5
-      warmup_value_bps: 1.0e8
-
-  - name: max_compression_single
-    type: max_compression_single
-
-  - name: historical_average_ce
-    type: historical_average_ce
-    channel_estimator:
-      type: mean
-      warmup_value_bps: 1.0e8
 ```
 
 ---
@@ -274,26 +321,52 @@ Artifacts are written to `{artifacts_dir}/profiling/{name}.json` and reused acro
 
 ### Accuracy Model (`accuracy_model`)
 
-*Surrogate backend only.* Trains a polynomial regression surrogate A_k(η) from (η, accuracy) pairs. Queries the metrics server for existing records first; runs a targeted sweep at `sweep_rates` if fewer than `min_samples` are found.
+Trains a surrogate A_k(η) for one pipeline via a **simulation-based sweep**. The pipeline's `simulation_path` must be set in `experiment.yaml`. The sweep evaluates `n_sweep_samples` distinct per-link η vectors through the simulation pipeline and fits a sklearn model to the resulting (η_vector, accuracy) pairs.
 
 ```yaml
 - name: accuracy_model_resnet
   type: accuracy_model
   pipeline_id: resnet-a
-  backend: surrogate
-  model_type: poly3
-  history_source: metrics_server
-  min_samples: 50
-  sweep_rates: [0.1, 0.2, 0.3, 0.5, 0.7, 0.8, 1.0]
+  model_type: gbm          # sklearn backend: linear_monotonic, poly2, poly3, gbm, rf, mlp, mlp_small
+  sweep_design: random     # random | diagonal
+  n_sweep_samples: 60      # number of (η_vector, accuracy) pairs to collect
+  dataset:                 # separate dataset slice — different seed from main tasks
+    name: cifar10
+    path: .datasets/cifar10
+    batch_size: 100
+    max_samples: 100
+    seed: 100
 ```
 
-For `stein_simulated` and `stein_distributed` backends, A_k(η) is evaluated on-the-fly via the Stein oracle — no pre-training is required and `accuracy_model` sub-experiments can be omitted.
+The `dataset` block uses a different `seed` than the main `datasets` entry and the `stein_datasets` entry so that accuracy model training data does not overlap with actual inference task data or Stein oracle evaluation data.
+
+The fitted model is pickled to `{artifacts_dir}/accuracy_models/{pipeline_id}_{name}.pkl` with a companion `{name}.json` storing the config hash for cache invalidation. If both files exist and the hash matches, the sweep is skipped and the cached model is loaded.
+
+For sub-experiments using a Stein oracle (`stein_config` set), A_k(η) is evaluated on-the-fly — no `accuracy_model` phase is needed.
 
 ### No-CSI Optimizer (`no_csi`)
 
 Primal-dual online optimizer. Does not require knowledge of the instantaneous channel state; instead uses a channel estimator and a Lagrangian dual variable λ_k per pipeline that penalises throughput violations.
 
 `mu_sweep` is a list of penalty weights μ. Each μ value produces **one independent run** with its own dual variable state. All runs share the same profiling artifacts.
+
+With surrogate accuracy models (one per pipeline):
+
+```yaml
+- name: no_csi_mu_sweep
+  type: no_csi
+  mu_sweep: [0.5, 1.0, 3.0, 10.0]
+  accuracy_model_refs:            # names of accuracy_model sub-experiments to load
+    - accuracy_model_resnet
+    - accuracy_model_llama
+  bcd_iterations: 10
+  channel_estimator:
+    type: moving_average
+    window_size: 10
+    warmup_value_bps: 1.0e8
+```
+
+With Stein oracle (no pre-training needed):
 
 ```yaml
 - name: no_csi_sweep
@@ -308,6 +381,8 @@ Primal-dual online optimizer. Does not require knowledge of the instantaneous ch
     window_size: 10
     warmup_value_bps: 1.0e8
 ```
+
+`accuracy_model_refs` is a list of `accuracy_model` sub-experiment names. Each referenced sub-experiment covers one pipeline (determined by its `pipeline_id`); the runner merges them into a single `{pipeline_id → AccuracyModel}` map before passing to the optimizer. `stein_config` takes priority over `accuracy_model_refs` when both are set.
 
 For single-pipeline experiments this uses `NoCSISingleTaskOptimizer`; for multi-pipeline experiments it uses `NoCSIMultiTaskOptimizer` (block-coordinate descent).
 
@@ -387,8 +462,88 @@ experiments/opt/resnet56_llama_mmlu_linear-3-multi_100mbps/
 
 The generator:
 - Injects node host/port from the profile.
-- Sets `artifacts_dir` to `{experiment_dir}/artifacts/`.
+- Sets `artifacts_dir` to `artifacts/{exp_name}` (relative to the working directory where `opt_runner` is invoked).
 - Injects `channel_estimator.experiment_name_contains` from the profile filename stem so probe history is scoped to the correct hardware profile.
+
+---
+
+## Deploying Optimizer Experiments
+
+Optimizer experiments share the same multi-model node infrastructure (`dnn-compute-multi`) and additionally require the `dnn-orchestrator` image. Build all images first:
+
+```bash
+make build-multi
+make build-metrics
+make build-orchestrator
+```
+
+### Docker
+
+Generate a `docker-compose.yml` and optionally apply it immediately:
+
+```bash
+python -m framework.deploy \
+    --experiment experiments/opt/resnet56_llama_mmlu_linear-3-multi_100mbps \
+    --opt \
+    --target docker \
+    --partitions-dir /absolute/path/to/.partitions \
+    --dataset-dir /absolute/path/to/.datasets \
+    --artifacts-dir /absolute/path/to/artifacts/resnet56_llama_mmlu_linear-3-multi_100mbps \
+    --apply
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--partitions-dir` | *(required)* | Host path to the partitions base directory (contains `resnet/`, `llama/` subdirs) |
+| `--dataset-dir` | *(required)* | Host path to the base `.datasets/` directory |
+| `--artifacts-dir` | `artifacts/` | Host path that maps to the container's `artifacts/{exp_name}/` directory |
+| `--metrics-dir` | `metrics_data` | Host path for metrics NDJSON storage |
+| `--apply` | — | Run `docker compose up -d` immediately after generating the manifest |
+
+The manifest is written to `experiments/opt/{exp_name}/deploy/docker-compose.yml`.
+
+The orchestrator container mounts `--artifacts-dir` at `/app/artifacts/{exp_name}/` (read-write). All profiling results, accuracy model pickles, and estimator state files are written there and persist on the host across container restarts. `--artifacts-dir` defaults to `./artifacts/` but should point to the experiment-specific subdirectory so the ArtifactStore's layout lands cleanly:
+
+```
+/absolute/path/to/artifacts/resnet56_llama_mmlu_linear-3-multi_100mbps/
+  profiling/
+  accuracy_models/
+    resnet-a_accuracy_model_resnet.pkl
+    resnet-a_accuracy_model_resnet.json
+    llama-mmlu-a_accuracy_model_llama.pkl
+    llama-mmlu-a_accuracy_model_llama.json
+  estimators/
+  slots/
+```
+
+### Kubernetes
+
+Generate a `manifests.yaml` and optionally apply it:
+
+```bash
+python -m framework.deploy \
+    --experiment experiments/opt/resnet56_llama_mmlu_linear-3-multi_100mbps \
+    --opt \
+    --target k8s \
+    --partitions-dir /absolute/path/to/.partitions \
+    --dataset-dir /absolute/path/to/.datasets \
+    --artifacts-dir /absolute/path/to/artifacts/resnet56_llama_mmlu_linear-3-multi_100mbps \
+    --namespace my-namespace \
+    --apply
+```
+
+The manifest is written to `experiments/opt/{exp_name}/deploy/manifests.yaml`. It includes:
+- One `Pod` per compute node (`dnn-compute-multi` image)
+- A `Service` per compute node
+- A metrics `Pod` + `Service` (`dnn-metrics` image)
+- One orchestrator `Job` (`dnn-orchestrator` image)
+
+**Artifact storage on Kubernetes** — the orchestrator Job uses a `hostPath` volume mounted at `/app/artifacts/{exp_name}/` inside the pod. Artifacts are written to `--artifacts-dir` on the **filesystem of whichever cluster node the orchestrator pod is scheduled on**. This has two implications:
+
+1. The directory must exist on that node before the Job starts. Create it manually or via an `initContainer` if needed.
+2. `hostPath` volumes are node-local and not shared. If you need artifacts to survive pod rescheduling or be accessible from multiple nodes, use a `PersistentVolumeClaim` with `ReadWriteMany` access (e.g., NFS or a cloud-provider managed disk) and patch the generated manifest accordingly.
+
+`--artifacts-dir` should always be specified explicitly for Kubernetes — the default (`./artifacts/`) is a relative path and will resolve to an unpredictable location on the node's filesystem.
 
 ---
 
@@ -456,14 +611,16 @@ Emitted once per pipeline per slot.
 
 ### `task_accuracy`
 
-Emitted once per pipeline per slot. Records inference accuracy and compression rate for regression tracking.
+Emitted once per pipeline per slot during optimization, and once per simulation sample during `accuracy_model` sweeps.
 
 | Field | Description |
 |-------|-------------|
 | `pipeline_id` | Pipeline name |
-| `compression_rate` | η value on the first link (representative) |
-| `accuracy` | Top-1 accuracy (ResNet) or MMLU accuracy (Llama) this slot |
-| `slot_id` | Slot index |
+| `compression_rate` | Mean η across all links (scalar summary) |
+| `accuracy` | Top-1 accuracy (ResNet) or MMLU accuracy (Llama) |
+| `eta_per_link` | `{link_id: η}` per-link vector; set during `accuracy_model` sweeps, `null` during slot loop |
+| `slot_id` | Slot index; `null` during accuracy model sweeps |
+| `sub_experiment_name` | Sub-experiment that emitted this record |
 
 ---
 

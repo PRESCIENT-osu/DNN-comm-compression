@@ -212,54 +212,43 @@ class ProfilingSubExperiment(BaseModel):
     name: str
 
 
-class AccuracyModelBackend(StrEnum):
-    """Backend for estimating A_k(η)."""
-
-    SURROGATE = "surrogate"
-    STEIN_SIMULATED = "stein_simulated"
-    STEIN_DISTRIBUTED = "stein_distributed"
-
-
 class AccuracyModelSubExperiment(BaseModel):
-    """Trains or loads an accuracy model A_k(η) for one pipeline.
+    """Trains a surrogate accuracy model A_k(η) for one pipeline.
 
-    Surrogate backend: fits a sklearn model to (η, accuracy) pairs from the
-    metrics server or a targeted sweep.
+    Runs a simulation-based sweep over per-link η vectors drawn from the
+    configured sweep design, evaluates accuracy on each sample using the
+    pipeline's simulation (``simulation_path``), then fits a sklearn surrogate
+    to the resulting (η_vector, accuracy) pairs.  The fitted model is persisted
+    as a pickle artifact and loaded by subsequent optimization sub-experiments.
 
-    Stein simulated backend: loads all partitions locally, applies hooks at
-    boundaries to compress/decompress in-process, estimates ∇A_k via
-    simultaneous perturbation (η ± σZ).
-
-    Stein distributed backend: submits real inference requests with perturbed η
-    through the actual distributed pipeline to estimate ∇A_k.
+    The sweep dataset is independent of the main task dataset and the Stein
+    oracle dataset to prevent data leakage across evaluation roles.
 
     Args:
         name: Sub-experiment name, used as artifact key.
         pipeline_id: Which pipeline to model.
-        backend: Estimation method.
-        model_type: sklearn model family for surrogate backend.
-        history_source: Where to query (η, accuracy) records for surrogate training.
-        min_samples: Minimum records required before fitting; triggers a targeted
-            sweep if fewer records are found.
-        sweep_rates: η values used for the targeted sweep when min_samples is not met.
-        stein_config: Stein oracle hyperparameters.  Required when backend is
-            ``stein_simulated``.  The full model is loaded from the pipeline's
-            ``simulation_path`` field in the experiment config.
+        model_type: sklearn model family.  One of ``"linear_monotonic"``,
+            ``"poly2"``, ``"poly3"``, ``"gbm"``, ``"rf"``, ``"mlp"``,
+            ``"mlp_small"``.
+        sweep_design: How to sample the η space.  ``"random"`` draws
+            ``n_sweep_samples`` points uniformly at random in
+            ``[eta_min, eta_max]^n_links``; ``"diagonal"`` uses a 1-D grid
+            with uniform η across all links.
+        n_sweep_samples: Number of distinct η vectors to evaluate during the
+            sweep.  Each vector triggers one simulation pass over the dataset
+            batch configured in ``dataset``.
+        dataset: Dataset slice used exclusively for accuracy evaluation during
+            the sweep.  Should use a different seed than the main task dataset
+            and the Stein oracle dataset.
     """
 
     type: Literal["accuracy_model"] = "accuracy_model"
     name: str
     pipeline_id: str
-    backend: AccuracyModelBackend = AccuracyModelBackend.SURROGATE
-    # Surrogate
-    model_type: str = "poly3"
-    history_source: ChannelEstimatorHistorySource = (
-        ChannelEstimatorHistorySource.METRICS_SERVER
-    )
-    min_samples: int = 50
-    sweep_rates: list[float] = Field(default_factory=lambda: [0.1, 0.2, 0.5, 0.8, 1.0])
-    # Stein backend
-    stein_config: SteinOracleConfig | None = None
+    model_type: str = "gbm"
+    sweep_design: Literal["diagonal", "random"] = "random"
+    n_sweep_samples: int = 60
+    dataset: DatasetConfig
 
 
 class NoCsiSubExperiment(BaseModel):
@@ -271,9 +260,11 @@ class NoCsiSubExperiment(BaseModel):
     Args:
         name: Sub-experiment name prefix; each mu run is named ``{name}_mu{mu}``.
         mu_sweep: Penalty weight μ values to try (one run each).
-        accuracy_model_ref: Name of the AccuracyModelSubExperiment whose artifact
-            to load as A_k(η).  Required only when backend is surrogate; may be
-            None for stein_simulated backends.
+        accuracy_model_refs: Names of AccuracyModelSubExperiment whose artifacts
+            to load as A_k(η) per pipeline.  Each entry is the ``name`` of an
+            AccuracyModelSubExperiment; its ``pipeline_id`` determines which
+            pipeline the model applies to.  May be None when a Stein oracle
+            is used instead.
         stein_config: Stein gradient oracle hyperparameters.  Used when the
             accuracy model backend is stein_simulated.
         channel_estimator: Channel capacity estimator config.
@@ -287,7 +278,7 @@ class NoCsiSubExperiment(BaseModel):
     type: Literal["no_csi"] = "no_csi"
     name: str
     mu_sweep: list[float] = Field(default_factory=lambda: [1.0])
-    accuracy_model_ref: str | None = None
+    accuracy_model_refs: list[str] | None = None
     stein_config: SteinOracleConfig | None = None
     channel_estimator: ChannelEstimatorConfig = Field(
         default_factory=ChannelEstimatorConfig
@@ -560,6 +551,10 @@ class OptSpecConfig(BaseModel):
         nodes: Node names in the experiment topology.
         pipelines: Named pipeline instances with partition assignments and flows.
         datasets: Dataset config keyed by model type string.
+        stein_datasets: Dataset configs used exclusively by the Stein oracle,
+            keyed by model type string.  Should use different seeds than
+            ``datasets`` to prevent data overlap with actual inference tasks.
+            Required when any sub-experiment uses a ``stein_config``.
         workload: Task submission pattern and mix ratio.
         tasks: Per-pipeline throughput targets and WFQ weights.
         links: Per-link optimization search space constraints.
@@ -570,6 +565,7 @@ class OptSpecConfig(BaseModel):
     nodes: list[str]
     pipelines: list[PipelineConfig]
     datasets: dict[str, DatasetConfig]
+    stein_datasets: dict[str, DatasetConfig] | None = None
     workload: WorkloadConfig
     tasks: dict[str, OptTaskConfig]
     links: list[OptLinkConfig]
@@ -609,6 +605,9 @@ class GeneratedOptExperimentConfig(BaseModel):
         nodes: Physical nodes with host and port resolved from the profile.
         pipelines: Named pipeline instances.
         datasets: Dataset config keyed by model type string.
+        stein_datasets: Dataset configs used exclusively by the Stein oracle,
+            keyed by model type string.  Should use different seeds than
+            ``datasets`` to prevent data overlap with actual inference tasks.
         workload: Task submission pattern and mix ratio.
         tasks: Per-pipeline throughput targets and WFQ weights.
         links: Per-link optimization search space constraints.
@@ -623,6 +622,7 @@ class GeneratedOptExperimentConfig(BaseModel):
     nodes: list[MultiNodeConfig]
     pipelines: list[PipelineConfig]
     datasets: dict[str, DatasetConfig]
+    stein_datasets: dict[str, DatasetConfig] | None = None
     workload: WorkloadConfig
     tasks: dict[str, OptTaskConfig]
     links: list[OptLinkConfig]
