@@ -71,7 +71,12 @@ class SlotResult:
     Attributes:
         per_pipeline_latency_ms: Per-pipeline list of task E2E latencies (ms).
         per_pipeline_results: Per-pipeline list of (labels, decoded) pairs.
+            For classification/MMLU pipelines, decoded is a list of predicted
+            class indices.  For perplexity pipelines, decoded is a
+            ``(nll_sum, token_count)`` tuple.
         wall_time_s: Wall-clock duration of the slot in seconds.
+        perplexity_baselines: Baseline NLL per pipeline for WikiText normalization.
+            Set by opt_runner during profiling; empty dict means no WikiText pipelines.
     """
 
     per_pipeline_latency_ms: dict[str, list[float]] = field(default_factory=dict)
@@ -79,6 +84,7 @@ class SlotResult:
         default_factory=dict
     )
     wall_time_s: float = 0.0
+    perplexity_baselines: dict[str, float] = field(default_factory=dict)
 
     def achieved_rps(self, pipeline_id: str) -> float:
         """Return observed task throughput for a pipeline (tasks/second).
@@ -92,26 +98,38 @@ class SlotResult:
         n = len(self.per_pipeline_latency_ms.get(pipeline_id, []))
         return n / self.wall_time_s if self.wall_time_s > 0 else 0.0
 
-    def accuracy(self, pipeline_id: str) -> float:
-        """Return task accuracy for a pipeline (0.0–1.0).
+    def quality_metric(self, pipeline_id: str) -> float:
+        """Return quality metric in [0, 1] for a pipeline (higher = better).
 
-        Applicable to classification and MMLU pipelines.  Returns 0.0 for
-        perplexity pipelines (where decoded results are (nll_sum, token_count)
-        tuples rather than predicted index lists).
+        For classification and MMLU pipelines, returns top-1 accuracy.
+        For perplexity pipelines, decoded results are ``(nll_sum, token_count)``
+        tuples; returns ``exp(-max(0, ratio - 1))`` where
+        ``ratio = mean_nll / baseline_nll`` and baseline_nll is taken from
+        ``self.perplexity_baselines``.  If no baseline is stored for the pipeline,
+        falls back to ``exp(-mean_nll)`` clamped to [0, 1].
 
         Args:
             pipeline_id: Pipeline identifier.
 
         Returns:
-            Fraction of correctly predicted samples; 0.0 if no results or
-            if the pipeline uses a perplexity metric.
+            Quality metric in [0, 1].
         """
         pairs = self.per_pipeline_results.get(pipeline_id, [])
         if not pairs:
             return 0.0
         _, first = pairs[0]
-        if not isinstance(first, list):
-            return 0.0
+        # Perplexity path: decoded is a (nll_sum, token_count) tuple.
+        if isinstance(first, tuple):
+            total_nll = sum(float(nll) for _, (nll, _) in pairs)
+            total_tokens = sum(int(tc) for _, (_, tc) in pairs)
+            mean_nll = total_nll / total_tokens if total_tokens > 0 else 0.0
+            baseline = self.perplexity_baselines.get(pipeline_id)
+            if baseline and baseline > 0:
+                ratio = mean_nll / baseline
+            else:
+                ratio = mean_nll
+            return math.exp(-max(0.0, ratio - 1.0))
+        # Classification / MMLU path: decoded is a list of predicted indices.
         correct = sum(
             1
             for labels, predicted in pairs
@@ -472,13 +490,14 @@ class MultiDataClient:
             first_node_url = f"http://{node_host or node.host}:{node.port}/infer"
             loader = loaders[pipeline.name]
 
-            for batch_idx, input_tensor, labels in loader.batches():
+            for batch_idx, input_tensor, labels, attention_mask in loader.batches():
                 task = asyncio.create_task(
                     self._send_one(
                         pipeline_id=pipeline.name,
                         batch_idx=batch_idx,
                         input_tensor=input_tensor,
                         labels=labels,
+                        attention_mask=attention_mask,
                         loader=loader,
                         first_node_url=first_node_url,
                         run=run,
@@ -533,9 +552,9 @@ class MultiDataClient:
                 f"http://{node_host or node.host}:{node.port}/infer"
             )
 
-        batch_iters: dict[str, Iterator[tuple[int, torch.Tensor, list[int]]]] = {
-            name: iter(loaders[name].batches()) for name in pipeline_names
-        }
+        batch_iters: dict[
+            str, Iterator[tuple[int, torch.Tensor, list[int], torch.Tensor | None]]
+        ] = {name: iter(loaders[name].batches()) for name in pipeline_names}
         exhausted: set[str] = set()
         active_tasks: list[asyncio.Task[None]] = []
 
@@ -550,7 +569,9 @@ class MultiDataClient:
             pipeline_id = random.choices(available, weights=norm_weights, k=1)[0]
 
             try:
-                batch_idx, input_tensor, labels = next(batch_iters[pipeline_id])
+                batch_idx, input_tensor, labels, attention_mask = next(
+                    batch_iters[pipeline_id]
+                )
             except StopIteration:
                 exhausted.add(pipeline_id)
                 continue
@@ -561,6 +582,7 @@ class MultiDataClient:
                     batch_idx=batch_idx,
                     input_tensor=input_tensor,
                     labels=labels,
+                    attention_mask=attention_mask,
                     loader=loaders[pipeline_id],
                     first_node_url=node_urls[pipeline_id],
                     run=run,
@@ -596,6 +618,7 @@ class MultiDataClient:
         lock: asyncio.Lock,
         emitter: MetricsEmitter,
         sub_experiment_name: str | None = None,
+        attention_mask: torch.Tensor | None = None,
     ) -> None:
         """Submit one task to its pipeline's first node and collect the result.
 
@@ -634,6 +657,7 @@ class MultiDataClient:
                     callback_url=self.callback_url,
                     experiment_id=self._exp.name,
                     run_id=run.run_id,
+                    attention_mask=attention_mask,
                 )
                 result_payload = await asyncio.wait_for(
                     future, timeout=self._result_timeout_s
@@ -692,6 +716,7 @@ class MultiDataClient:
         emitter: MetricsEmitter,
         slot_id: int | None = None,
         sub_experiment_name: str | None = None,
+        perplexity_baselines: dict[str, float] | None = None,
     ) -> SlotResult:
         """Submit n_batches tasks for one optimization slot and collect results.
 
@@ -706,6 +731,8 @@ class MultiDataClient:
             emitter: Metrics emitter for TaskE2EEvent emission.
             slot_id: Optimizer slot index; None for standalone multi-model sweeps.
             sub_experiment_name: Active sub-experiment name; None for standalone sweeps.
+            perplexity_baselines: Baseline NLL per pipeline for WikiText normalization.
+                Passed through to ``SlotResult`` for use in ``quality_metric()``.
 
         Returns:
             SlotResult with per-pipeline latencies and decoded results.
@@ -745,7 +772,7 @@ class MultiDataClient:
             loader = loaders[pipeline.name]
             count = counts[pipeline.name]
 
-            for batch_idx, input_tensor, labels in itertools.islice(
+            for batch_idx, input_tensor, labels, attention_mask in itertools.islice(
                 loader.batches(), count
             ):
                 task = asyncio.create_task(
@@ -754,6 +781,7 @@ class MultiDataClient:
                         batch_idx=batch_idx,
                         input_tensor=input_tensor,
                         labels=labels,
+                        attention_mask=attention_mask,
                         loader=loader,
                         first_node_url=first_node_url,
                         run=run_handle,
@@ -801,6 +829,7 @@ class MultiDataClient:
             per_pipeline_latency_ms=latencies,
             per_pipeline_results=results,
             wall_time_s=wall_time_s,
+            perplexity_baselines=perplexity_baselines or {},
         )
 
     def _make_app(self) -> FastAPI:
@@ -903,9 +932,21 @@ class _PipelineLoader:
             self._loader = get_dataset(dataset_cfg)
             self._metric_type = "accuracy"
 
-    def batches(self) -> Iterator[tuple[int, torch.Tensor, list[int]]]:
-        """Yield (batch_idx, input_tensor, labels) tuples."""
-        return self._loader.batches()
+    def batches(
+        self,
+    ) -> Iterator[tuple[int, torch.Tensor, list[int], torch.Tensor | None]]:
+        """Yield (batch_idx, input_tensor, labels, attention_mask) tuples.
+
+        attention_mask is None for ResNet and WikiText-2; present for MMLU
+        batches with batch_size > 1.
+        """
+        if self._metric_type == "accuracy":
+            # ResNet: underlying loader yields 3-tuples; synthesize None mask.
+            for batch_idx, input_tensor, labels in self._loader.batches():
+                yield batch_idx, input_tensor, labels, None
+        else:
+            # Llama loaders already yield 4-tuples.
+            yield from self._loader.batches()
 
     def num_batches(self) -> int:
         """Return the total number of batches in this pipeline's dataset."""
@@ -955,6 +996,7 @@ async def _post_infer(
     callback_url: str,
     experiment_id: str,
     run_id: str,
+    attention_mask: torch.Tensor | None = None,
 ) -> None:
     """Pickle and POST a task to a multi-model pipeline's first node.
 
@@ -966,15 +1008,22 @@ async def _post_infer(
         callback_url: URL the last node should POST results to.
         experiment_id: Experiment name for metrics tagging.
         run_id: Run identifier for metrics tagging.
+        attention_mask: Optional padding mask [B, L]; present for MMLU batches
+            with batch_size > 1.
     """
     raw = base64.b64encode(pickle.dumps(input_tensor)).decode()
-    payload = {
+    payload: dict[str, str | None] = {
         "task_id": task_id,
         "pipeline_id": pipeline_id,
         "callback_url": callback_url,
         "experiment_id": experiment_id,
         "run_id": run_id,
         "data": raw,
+        "attention_mask": (
+            base64.b64encode(pickle.dumps(attention_mask.bool())).decode()
+            if attention_mask is not None
+            else None
+        ),
     }
     async with httpx.AsyncClient(timeout=30.0) as client:
         resp = await client.post(first_node_url, json=payload)

@@ -332,6 +332,10 @@ class OptRunner:
         self._tau_per_node: dict[str, dict[str, float]] = {}
         self._a_per_link_bytes: dict[str, float] = {}
 
+        # Baseline NLL per pipeline for WikiText perplexity normalization.
+        # Populated during profiling (η=1.0) and passed to run_slot() calls.
+        self._perplexity_baselines: dict[str, float] = {}
+
     # ------------------------------------------------------------------
     # Top-level orchestration
     # ------------------------------------------------------------------
@@ -352,13 +356,21 @@ class OptRunner:
             logger.info(
                 "[%s] Sub-experiment complete in %.1fs", sub_exp.name, duration_s
             )
+            if isinstance(sub_exp, ProfilingSubExperiment):
+                n_runs = 1
+            elif isinstance(sub_exp, AccuracyModelSubExperiment):
+                n_runs = sub_exp.n_sweep_samples
+            elif isinstance(sub_exp, NoCsiSubExperiment):
+                n_runs = self._exp.optimization_loop.n_slots * len(sub_exp.mu_sweep)
+            else:
+                n_runs = self._exp.optimization_loop.n_slots
             self._emitter.emit(
                 SubExperimentEvent(
                     experiment_id=self._exp.name,
                     run_id=sub_exp.name,
                     sub_experiment_name=sub_exp.name,
                     duration_s=duration_s,
-                    n_runs=self._exp.optimization_loop.n_slots,
+                    n_runs=n_runs,
                 )
             )
         logger.info("Optimization experiment '%s' complete", self._exp.name)
@@ -369,11 +381,33 @@ class OptRunner:
         elif isinstance(sub_exp, AccuracyModelSubExperiment):
             await self._run_accuracy_model(sub_exp)
         elif isinstance(sub_exp, NoCsiSubExperiment):
+            # Build simulations once outside the mu loop to avoid reloading
+            # the Llama model for every mu value.
+            stein_cfg = getattr(sub_exp, "stein_config", None)
+            pre_sims: dict[str, Any] | None = None
+            if stein_cfg is not None:
+                from framework.optimizer.simulation_factory import (  # noqa: PLC0415
+                    build_simulations,
+                )
+
+                pre_sims = build_simulations(
+                    self._exp,
+                    stein_cfg,
+                    self._mapper,
+                    dataset_override=self._exp.stein_datasets,
+                )
             for mu in sub_exp.mu_sweep:
-                await self._run_opt_with_adapter(sub_exp, mu=mu)
+                await self._run_opt_with_adapter(
+                    sub_exp, mu=mu, pre_built_simulations=pre_sims
+                )
         else:
-            # All other optimization sub-experiments (baselines + CSI-aware)
-            await self._run_opt_with_adapter(sub_exp)
+            # All other optimization sub-experiments (baselines + CSI-aware).
+            # CSI-aware never uses the Stein oracle (closed-form η*), so skip
+            # simulation building even if stein_config is set.
+            await self._run_opt_with_adapter(
+                sub_exp,
+                skip_stein=isinstance(sub_exp, CsiAwareSubExperiment),
+            )
 
     # ------------------------------------------------------------------
     # Phase: profiling
@@ -403,6 +437,7 @@ class OptRunner:
             self._nominal_bps_per_link = data.get("nominal_bps_per_link", {})
             self._tau_per_node = data.get("tau_per_node_s", {})
             self._a_per_link_bytes = data.get("a_per_link_bytes", {})
+            self._perplexity_baselines = data.get("perplexity_baselines", {})
             return
 
         # Push η=eta_max (no compression) to all links.
@@ -422,6 +457,21 @@ class OptRunner:
             node_host=self._node_host,
             emitter=self._emitter,
         )
+
+        # Compute WikiText perplexity baselines from the η=1.0 profiling slot.
+        # For perplexity pipelines, decoded results are (nll_sum, token_count)
+        # tuples; mean NLL at uncompressed η is the normalization denominator.
+        perplexity_baselines: dict[str, float] = {}
+        for pid, pairs in slot_result.per_pipeline_results.items():
+            if not pairs:
+                continue
+            _, first_decoded = pairs[0]
+            if isinstance(first_decoded, tuple):
+                total_nll = sum(float(nll) for _, (nll, _) in pairs)
+                total_tokens = sum(int(tc) for _, (_, tc) in pairs)
+                if total_tokens > 0:
+                    perplexity_baselines[pid] = total_nll / total_tokens
+        self._perplexity_baselines = perplexity_baselines
 
         # Probe links at η=1.0 to measure nominal channel capacity.
         probe_results = await self._link_prober.probe_all(
@@ -446,7 +496,7 @@ class OptRunner:
             pid = pipeline.name
             lats = slot_result.per_pipeline_latency_ms.get(pid, [])
             per_pipeline[pid] = {
-                "accuracy": slot_result.accuracy(pid),
+                "accuracy": slot_result.quality_metric(pid),
                 "avg_latency_ms": sum(lats) / len(lats) if lats else 0.0,
                 "n_samples": len(lats),
             }
@@ -456,6 +506,7 @@ class OptRunner:
             "nominal_bps_per_link": probe_results,
             "tau_per_node_s": tau_per_node,
             "a_per_link_bytes": a_per_link,
+            "perplexity_baselines": perplexity_baselines,
         }
         self._artifacts.write_json(artifact_path, artifact_data, config_hash)
         self._tau_per_node: dict[str, dict[str, float]] = tau_per_node
@@ -717,6 +768,14 @@ class OptRunner:
                 if first_link
                 else "topk"
             )
+            # For WikiText simulations, n_samples is the number of sliding-window
+            # sequences evaluated; for classification/MMLU it is the batch size.
+            fast_eval = getattr(sim, "fast_evaluator", None)
+            n_samples = (
+                fast_eval.n_sequences
+                if fast_eval is not None and hasattr(fast_eval, "n_sequences")
+                else sub_exp.dataset.batch_size
+            )
             run_id = f"{self._exp.name}_{sub_exp.name}_sweep_{i}"
             self._emitter.emit(
                 TaskAccuracyEvent(
@@ -727,7 +786,7 @@ class OptRunner:
                     compression_method=comp_method,
                     compression_rate=float(np.mean(eta_vec)),
                     accuracy=acc,
-                    n_samples=sub_exp.dataset.batch_size,
+                    n_samples=n_samples,
                     eta_per_link=eta_per_link,
                     sub_experiment_name=sub_exp.name,
                 )
@@ -829,6 +888,8 @@ class OptRunner:
         self,
         sub_exp: OptSubExperiment,
         mu: float | None = None,
+        pre_built_simulations: dict[str, Any] | None = None,
+        skip_stein: bool = False,
     ) -> None:
         """Run a slot loop using the external optimizer adapter interface.
 
@@ -839,12 +900,21 @@ class OptRunner:
         Args:
             sub_exp: Sub-experiment config (any optimization sub-experiment type).
             mu: Override mu for NoCsiSubExperiment runs (one call per mu value).
+            pre_built_simulations: Pre-built simulation dict from the caller
+                (avoids reloading for each μ in a mu_sweep). When provided,
+                skips the internal build_simulations call.
+            skip_stein: When True, skip simulation building even if
+                stein_config is set (used for CSI-aware, which resolves η*
+                analytically and never invokes accuracy callables).
         """
         global_order = build_global_order(self._exp)
 
         stein_cfg = getattr(sub_exp, "stein_config", None)
         simulations: dict[str, Any] | None = None
-        if stein_cfg is not None:
+        if pre_built_simulations is not None:
+            # Caller already built simulations; reuse them.
+            simulations = pre_built_simulations
+        elif stein_cfg is not None and not skip_stein:
             from framework.optimizer.simulation_factory import (  # noqa: PLC0415
                 build_simulations,
             )
@@ -1006,6 +1076,7 @@ class OptRunner:
                 emitter=self._emitter,
                 slot_id=slot_id,
                 sub_experiment_name=sub_exp_name,
+                perplexity_baselines=self._perplexity_baselines,
             )
 
             # --- 7. Emit events ---
@@ -1051,7 +1122,7 @@ class OptRunner:
                     )
                 )
 
-                acc = slot_result.accuracy(pid)
+                acc = slot_result.quality_metric(pid)
                 # Use first link's η for this pipeline as representative compression rate.
                 first_link = self._exp.links[0] if self._exp.links else None
                 comp_rate = (

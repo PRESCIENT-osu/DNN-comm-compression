@@ -4,14 +4,16 @@ Provides concrete implementations of the ``LlamaEvaluator`` protocol defined
 in ``models.llama.simulation.pipeline``.  Each wrapper delegates to an
 external evaluator and adapts its interface to the protocol.
 
-The adapter (``framework.optimizer.inference_optimizer_adapter``) instantiates
-these from the optspec dataset config and injects them into
-``SimulatedLlamaPipeline``.
+``simulation_factory.build_simulations`` instantiates these from the optspec
+dataset config and injects them into ``SimulatedLlamaPipeline``.
+``MMLUEvaluatorWrapper`` is used for MMLU datasets;
+``WikiTextPerplexityEvaluator`` is used for WikiText-2.
 """
 
 from __future__ import annotations
 
 import logging
+import math
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -131,6 +133,18 @@ class WikiTextPerplexityEvaluator:
         text = "\n\n".join(dataset["test"]["text"])
         encodings = tokenizer(text, return_tensors="pt")
         self._input_ids: torch.Tensor = encodings["input_ids"]
+
+    @property
+    def n_sequences(self) -> int:
+        """Number of sliding-window sequences evaluated over the dataset.
+
+        Computed from the token sequence length, the optional ``n_samples``
+        cap, and the fixed stride.  Used to populate ``n_samples`` in
+        ``TaskAccuracyEvent`` during accuracy model sweeps.
+        """
+        seq_len = self._input_ids.size(1)
+        limit = min(seq_len, self.n_samples) if self.n_samples else seq_len
+        return max(1, math.ceil(limit / self.stride))
 
     def _compute_nll(self, model: torch.nn.Module, device: torch.device) -> float:
         """Compute mean negative log-likelihood over the token sequence."""

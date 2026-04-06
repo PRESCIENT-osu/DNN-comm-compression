@@ -30,6 +30,7 @@ logger = logging.getLogger(__name__)
 
 _MODEL_RESNET = {"resnet", "resnet56"}
 _MODEL_LLAMA = {"llama", "llama-3.1-8b"}
+_DATASET_WIKITEXT = {"wikitext2", "wikitext-2"}
 
 
 # ---------------------------------------------------------------------------
@@ -340,16 +341,41 @@ def build_simulations(
                 continue
 
             fast_max = stein_cfg.n_fast_samples if stein_cfg is not None else None
-            fast_evaluator = _MMLULocalEvaluator(
-                cfg, tokenizer_path, max_items=fast_max
-            )
-            # When a dataset override is in effect (accuracy model sweep or Stein
-            # oracle datasets), cap the full evaluator at cfg.max_samples so we
-            # don't accidentally run the entire dataset on every oracle call.
+            # When a dataset override is in effect, cap the full evaluator at
+            # cfg.max_samples so we don't accidentally run the entire dataset on
+            # every oracle call.
             full_max = cfg.max_samples if dataset_override is not None else None
-            full_evaluator = _MMLULocalEvaluator(
-                cfg, tokenizer_path, max_items=full_max
-            )
+
+            is_wikitext = cfg.name.lower() in _DATASET_WIKITEXT
+
+            if is_wikitext:
+                from transformers import AutoTokenizer  # noqa: PLC0415
+
+                from framework.optimizer.evaluators import (  # noqa: PLC0415
+                    WikiTextPerplexityEvaluator,
+                )
+
+                tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
+                if tokenizer.pad_token is None:
+                    tokenizer.pad_token = tokenizer.eos_token
+
+                fast_evaluator: Any = WikiTextPerplexityEvaluator(
+                    tokenizer,
+                    dataset_path=cfg.path,
+                    n_samples=fast_max,
+                )
+                full_evaluator: Any = WikiTextPerplexityEvaluator(
+                    tokenizer,
+                    dataset_path=cfg.path,
+                    n_samples=full_max,
+                )
+            else:
+                fast_evaluator = _MMLULocalEvaluator(
+                    cfg, tokenizer_path, max_items=fast_max
+                )
+                full_evaluator = _MMLULocalEvaluator(
+                    cfg, tokenizer_path, max_items=full_max
+                )
 
             sim = SimulatedLlamaPipeline(
                 model_name=pipeline.simulation_path,
@@ -359,6 +385,17 @@ def build_simulations(
                 full_evaluator=full_evaluator,
                 compress_fns=compress_fns,
             )
+
+            if is_wikitext:
+                # Measure uncompressed baseline NLL so the evaluator can
+                # normalise future evaluations to [0, 1] via exp(-nll/baseline).
+                # set_eta([1.0, ...]) installs identity hooks (no compression).
+                sim.set_eta(torch.ones(sim.n_links))
+                fast_evaluator.set_baseline(sim.model, sim.device)
+                if full_evaluator is not fast_evaluator:
+                    full_evaluator.set_baseline(sim.model, sim.device)
+                logger.info("WikiText baseline set for pipeline '%s'", pipeline.name)
+
             result[pipeline.name] = sim
             logger.info(
                 "Built SimulatedLlamaPipeline for pipeline '%s' from '%s'",

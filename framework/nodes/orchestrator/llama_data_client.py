@@ -53,9 +53,14 @@ class _WikiText2Batches:
     """
 
     def __init__(self, config: DatasetConfig, tokenizer: AutoTokenizer) -> None:
-        from datasets import load_dataset  # type: ignore[import]
+        if config.path:
+            from datasets import load_from_disk  # type: ignore[import]
 
-        raw = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
+            raw = load_from_disk(str(config.path))["test"]
+        else:
+            from datasets import load_dataset  # type: ignore[import]
+
+            raw = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
         text = "\n\n".join(x for x in raw["text"] if len(x) > 20)
         tokens = tokenizer(text, return_tensors="pt").input_ids[0]  # [N]
 
