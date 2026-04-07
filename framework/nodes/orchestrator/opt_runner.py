@@ -657,7 +657,11 @@ class OptRunner:
             }
         )
 
-        if self._artifacts.is_valid(meta_path, config_hash) and pkl_path.exists():
+        if (
+            not sub_exp.force_retrain
+            and self._artifacts.is_valid(meta_path, config_hash)
+            and pkl_path.exists()
+        ):
             logger.info("[%s] Reusing cached accuracy model artifact", sub_exp.name)
             self._load_accuracy_model_from_artifact(sub_exp)
             return
