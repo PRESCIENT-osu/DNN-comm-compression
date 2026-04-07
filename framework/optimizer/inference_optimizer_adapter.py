@@ -193,7 +193,14 @@ def _make_stein_callables(
             eta_t = torch.tensor(eta_np, dtype=torch.float32)
             return float(simulation.accuracy(eta_t, n_samples=None))
 
+    _grad_call_count = [0]
+
     def gradient_callable(eta_np: np.ndarray) -> np.ndarray:
+        _grad_call_count[0] += 1
+        call_no = _grad_call_count[0]
+        logger.info(
+            "gradient_callable invocation #%d (eta=%s)", call_no, np.round(eta_np, 3)
+        )
         eta_t = torch.tensor(eta_np, dtype=torch.float32)
 
         def f(e: torch.Tensor) -> torch.Tensor:
@@ -202,6 +209,12 @@ def _make_stein_callables(
             )
 
         grad = grad_oracle(f, eta_t, sigma=sigma, N=N)
+        logger.info(
+            "gradient_callable #%d done (2*N=%d sim calls, grad_norm=%.4f)",
+            call_no,
+            2 * N,
+            float(np.linalg.norm(grad.numpy(force=True))),
+        )
         return grad.numpy(force=True)
 
     return accuracy_callable, accuracy_callable_true, gradient_callable

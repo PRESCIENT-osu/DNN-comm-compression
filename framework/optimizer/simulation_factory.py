@@ -340,7 +340,15 @@ def build_simulations(
                 )
                 continue
 
-            fast_max = stein_cfg.n_fast_samples if stein_cfg is not None else None
+            if stein_cfg is not None:
+                fast_max = stein_cfg.n_fast_samples
+            elif dataset_override is not None:
+                # No Stein oracle (e.g. accuracy model sweep) but a dataset
+                # override is active — cap the fast evaluator at cfg.max_samples
+                # so sim.accuracy() doesn't run the entire dataset on every call.
+                fast_max = cfg.max_samples
+            else:
+                fast_max = None
             # When a dataset override is in effect, cap the full evaluator at
             # cfg.max_samples so we don't accidentally run the entire dataset on
             # every oracle call.

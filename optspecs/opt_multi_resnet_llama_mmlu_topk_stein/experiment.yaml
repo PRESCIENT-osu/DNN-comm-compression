@@ -1,4 +1,11 @@
 # Optimization experiment spec: ResNet56 + Llama-MMLU on a 3-node linear topology.
+# Stein oracle variant — uses the full local models for accuracy/gradient estimation
+# instead of a surrogate fitted from sweep data.
+#
+# Each pipeline must specify simulation_path so the Stein oracle can load the
+# full model:
+#   resnet-a: path to the full ResNet56 .th checkpoint
+#   llama-mmlu-a: HuggingFace model name or local model directory
 #
 # Paired with a profile (e.g. profiles/linear-3-multi/100mbps.yaml) by
 # tools/generate.py --opt to produce a fully resolved experiment in
@@ -33,8 +40,8 @@ datasets:
     name: cifar10
     path: .datasets/cifar10
     batch_size: 100
-    max_in_flight: 10
-    max_samples: 1000
+    max_in_flight: 4
+    max_samples: 10
     seed: 42
   llama:
     name: mmlu
@@ -49,8 +56,32 @@ datasets:
       - global_facts
       - miscellaneous
       - business_ethics
-    samples_per_subject: 20
+    samples_per_subject: 10
     seed: 42
+
+# Dataset slices used exclusively by the Stein oracle during optimization.
+# Different seeds ensure minimal overlap with the main inference task dataset.
+stein_datasets:
+  resnet:
+    name: cifar10
+    path: .datasets/cifar10
+    batch_size: 25
+    max_samples: 60
+    seed: 200
+  llama:
+    name: mmlu
+    path: .datasets/mmlu
+    tokenizer_path: models/llama/.partitions/tokenizer
+    batch_size: 4
+    subjects:
+      - college_computer_science
+      - high_school_mathematics
+      - professional_law
+      - global_facts
+      - miscellaneous
+      - business_ethics
+    samples_per_subject: 10
+    seed: 201
 
 workload:
   pattern: fill
@@ -68,12 +99,11 @@ tasks:
     throughput_target: 0.2
     task_weight: 0.6
 
-# Per-link optimization search space.  The optimizer selects η ∈ [eta_min, eta_max]
-# from the allowed_methods each slot.
+# Per-link optimization search space.
 links:
   - from: A
     to: B
-    eta_min: 0.05
+    eta_min: 0.01
     eta_max: 1.0
     allowed_methods: [topk]
     llmint8_mapping:
@@ -86,15 +116,22 @@ links:
 
   - from: B
     to: C
-    eta_min: 0.05
+    eta_min: 0.01
     eta_max: 1.0
     allowed_methods: [topk]
+    llmint8_mapping:
+      resnet-a:
+        outlier_precision: fp16
+        regular_precision: int8
+      llama-mmlu-a:
+        outlier_precision: fp16
+        regular_precision: int8
 
 # Slot loop hyperparameters shared across all optimization sub-experiments.
 optimization_loop:
-  n_slots: 100
-  batches_per_slot: 10
-  profiling_batches: 20
+  n_slots: 50
+  batches_per_slot: 4
+  profiling_batches: 4
   link_probe_interval_slots: 1
   epsilon: 0.01
 

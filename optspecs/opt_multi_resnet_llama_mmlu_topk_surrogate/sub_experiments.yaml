@@ -30,12 +30,12 @@ sub_experiments:
     pipeline_id: resnet-a
     model_type: gbm
     sweep_design: random
-    n_sweep_samples: 60
+    n_sweep_samples: 40
     dataset:
       name: cifar10
       path: .datasets/cifar10
-      batch_size: 100
-      max_samples: 100
+      batch_size: 25
+      max_samples: 10
       seed: 100
 
   - name: accuracy_model_llama
@@ -43,7 +43,7 @@ sub_experiments:
     pipeline_id: llama-mmlu-a
     model_type: gbm
     sweep_design: random
-    n_sweep_samples: 60
+    n_sweep_samples: 40
     dataset:
       name: mmlu
       path: .datasets/mmlu
@@ -66,11 +66,11 @@ sub_experiments:
   # -----------------------------------------------------------------------
   - name: no_csi_mu_sweep
     type: no_csi
-    mu_sweep: [0.5, 1.0, 3.0, 10.0]
+    mu_sweep: [0.5, 4.0, 10.0]
     accuracy_model_refs:
       - accuracy_model_resnet
       - accuracy_model_llama
-    bcd_iterations: 10  # BCD iterations J per slot (multi-task only; ignored for single-task)
+    bcd_iterations: 5  # BCD iterations J per slot (multi-task only; ignored for single-task)
     channel_estimator:
       type: moving_average
       window_size: 10
@@ -85,23 +85,6 @@ sub_experiments:
   - name: csi_aware
     type: csi_aware
 
-  # -----------------------------------------------------------------------
-  # Phase 5: Baselines (single-task)
-  # -----------------------------------------------------------------------
-  - name: max_compression_single
-    type: max_compression_single
-
-  - name: no_compression_single
-    type: no_compression_single
-
-  - name: uniform_compression_single
-    type: uniform_compression_single
-
-  - name: myopic_single
-    type: estimated_csi_single
-    channel_estimator:
-      type: last_observation
-      warmup_value_bps: 1.0e8
 
   # -----------------------------------------------------------------------
   # Phase 6: Multi-task baselines

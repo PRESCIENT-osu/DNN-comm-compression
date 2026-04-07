@@ -1,0 +1,70 @@
+# Optimization experiment spec: Llama-3.1-8B WikiText-2 single-pipeline, LLM.int8 compression, surrogate accuracy model.
+
+nodes:
+  - A
+  - B
+  - C
+
+pipelines:
+  - name: llama-wiki-a
+    model: llama
+    partitions:
+      A: [p1]
+      B: [p2]
+      C: [p3]
+    flow: [A, B, C]
+    simulation_path: models/llama/llama-3.1-8b
+
+datasets:
+  llama:
+    name: wikitext2
+    path: .datasets/wikitext2
+    tokenizer_path: models/llama/.partitions/tokenizer
+    batch_size: 2
+    max_seq_len: 512
+    max_in_flight: 2
+    max_samples: 20
+    seed: 42
+
+workload:
+  pattern: fill
+  window_per_pipeline: 4
+  mix:
+    llama-wiki-a: 1.0
+
+tasks:
+  llama-wiki-a:
+    throughput_target: 0.2
+    task_weight: 1.0
+
+links:
+  - from: A
+    to: B
+    eta_min: 0.01
+    eta_max: 1.0
+    allowed_methods: [llmint8]
+    llmint8_mapping:
+      llama-wiki-a:
+        outlier_precision: fp16
+        regular_precision: int8
+
+  - from: B
+    to: C
+    eta_min: 0.01
+    eta_max: 1.0
+    allowed_methods: [llmint8]
+    llmint8_mapping:
+      llama-wiki-a:
+        outlier_precision: fp16
+        regular_precision: int8
+
+optimization_loop:
+  n_slots: 50
+  batches_per_slot: 4
+  profiling_batches: 4
+  link_probe_interval_slots: 1
+  epsilon: 0.01
+
+metrics_server:
+  host: metrics
+  port: 9100

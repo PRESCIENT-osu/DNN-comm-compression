@@ -1,0 +1,54 @@
+sub_experiments:
+
+  - name: profiling
+    type: profiling
+
+  - name: accuracy_model_llama
+    type: accuracy_model
+    pipeline_id: llama-mmlu-a
+    model_type: gbm
+    sweep_design: random
+    n_sweep_samples: 40
+    dataset:
+      name: mmlu
+      path: .datasets/mmlu
+      tokenizer_path: models/llama/.partitions/tokenizer
+      batch_size: 4
+      subjects:
+        - college_computer_science
+        - high_school_mathematics
+        - professional_law
+        - global_facts
+        - miscellaneous
+        - business_ethics
+      samples_per_subject: 4
+      seed: 101
+
+  - name: no_csi_mu_sweep
+    type: no_csi
+    mu_sweep: [0.5, 4.0, 10.0]
+    accuracy_model_refs:
+      - accuracy_model_llama
+    channel_estimator:
+      type: moving_average
+      window_size: 10
+      history_source: metrics_server
+      warmup_value_bps: 1.0e8
+
+  - name: csi_aware
+    type: csi_aware
+
+  - name: max_compression_single
+    type: max_compression_single
+
+  - name: no_compression_single
+    type: no_compression_single
+
+  - name: uniform_compression_single
+    type: uniform_compression_single
+
+  - name: myopic_single
+    type: estimated_csi_single
+    channel_estimator:
+      type: last_observation
+      warmup_value_bps: 1.0e8

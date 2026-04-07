@@ -27,12 +27,12 @@ sub_experiments:
   # -----------------------------------------------------------------------
   - name: no_csi_mu_sweep
     type: no_csi
-    mu_sweep: [0.5, 1.0, 3.0, 10.0]
-    bcd_iterations: 10  # BCD iterations J per slot (multi-task only; ignored for single-task)
+    mu_sweep: [0.5, 4.0, 10.0]
+    bcd_iterations: 5  # BCD iterations J per slot (multi-task only; ignored for single-task)
     stein_config:
       sigma: 0.05
-      N: 50
-      n_fast_samples: 128
+      N: 20
+      n_fast_samples: 30
     channel_estimator:
       type: moving_average
       window_size: 10
@@ -45,31 +45,9 @@ sub_experiments:
   # -----------------------------------------------------------------------
   - name: csi_aware
     type: csi_aware
-    stein_config:
-      sigma: 0.05
-      N: 50
-      n_fast_samples: 128
 
   # -----------------------------------------------------------------------
-  # Phase 4: Baselines (single-task)
-  # -----------------------------------------------------------------------
-  - name: max_compression_single
-    type: max_compression_single
-
-  - name: no_compression_single
-    type: no_compression_single
-
-  - name: uniform_compression_single
-    type: uniform_compression_single
-
-  - name: myopic_single
-    type: estimated_csi_single
-    channel_estimator:
-      type: last_observation
-      warmup_value_bps: 1.0e8
-
-  # -----------------------------------------------------------------------
-  # Phase 5: Multi-task baselines
+  # Phase 4: Multi-task baselines
   # -----------------------------------------------------------------------
   - name: max_compression_multi
     type: max_compression_multi
