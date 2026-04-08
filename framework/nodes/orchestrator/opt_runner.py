@@ -397,10 +397,18 @@ class OptRunner:
                     self._mapper,
                     dataset_override=self._exp.stein_datasets,
                 )
-            for mu in sub_exp.mu_sweep:
-                await self._run_opt_with_adapter(
-                    sub_exp, mu=mu, pre_built_simulations=pre_sims
-                )
+            try:
+                for mu in sub_exp.mu_sweep:
+                    await self._run_opt_with_adapter(
+                        sub_exp, mu=mu, pre_built_simulations=pre_sims
+                    )
+            finally:
+                if pre_sims:
+                    for sim in pre_sims.values():
+                        try:
+                            sim.remove_hooks()
+                        except Exception:
+                            pass
         else:
             # All other optimization sub-experiments (baselines + CSI-aware).
             # CSI-aware never uses the Stein oracle (closed-form η*), so skip
@@ -620,12 +628,17 @@ class OptRunner:
     async def _run_accuracy_model(self, sub_exp: AccuracyModelSubExperiment) -> None:
         """Train a surrogate accuracy model A_k(η) for one pipeline via simulation sweep.
 
-        1. Compute a config hash that includes compression scheme so cached
-           artifacts are invalidated when the compression method changes.
-        2. Return early if a valid cached artifact (pkl + metadata json) exists.
+        1. Build a content-addressed artifact path that encodes model, partition
+           layout, surrogate type, compression scheme, and a hash of the full
+           uniqueness set (including dataset seed).  Artifacts are stored under
+           ``shared_root/accuracy_models/`` so they are reusable across experiments
+           that use the same pipeline config and dataset.
+        2. Return early if the ``.pkl`` artifact already exists (content-addressed
+           path serves as the validity check).
         3. Otherwise run ``_run_accuracy_sweep_simulated`` to generate
            (η_vector, accuracy) pairs via the pipeline's simulation.
-        4. Fit a ``SurrogateAccuracyModel`` and persist it.
+        4. Fit a ``SurrogateAccuracyModel`` and persist it alongside a ``.json``
+           sidecar with human-readable metadata.
 
         Args:
             sub_exp: Accuracy model sub-experiment config.
@@ -633,8 +646,6 @@ class OptRunner:
         pipeline = self._exp.pipeline_for(sub_exp.pipeline_id)
         pipeline_links = self._pipeline_links(pipeline.flow)
 
-        # Include compression scheme in the config hash so cached models are
-        # invalidated when the mapper's method changes for this pipeline.
         compression_method_per_link = {
             lk.link_id: self._mapper.map(
                 lk.link_id, sub_exp.pipeline_id, lk.eta_min
@@ -642,29 +653,29 @@ class OptRunner:
             for lk in pipeline_links
         }
 
+        dataset_cfg = sub_exp.dataset
         base_path = self._artifacts.accuracy_model_path(
-            sub_exp.pipeline_id, sub_exp.name
+            model=pipeline.model,
+            partitions=pipeline.partitions,
+            flow=pipeline.flow,
+            simulation_path=pipeline.simulation_path,
+            surrogate_type=sub_exp.model_type,
+            compression_method_per_link=compression_method_per_link,
+            sweep_design=sub_exp.sweep_design,
+            n_sweep_samples=sub_exp.n_sweep_samples,
+            dataset_seed=dataset_cfg.seed,
+            dataset_max_samples=dataset_cfg.max_samples,
         )
         pkl_path = base_path.with_suffix(".pkl")
         meta_path = base_path.with_suffix(".json")
 
-        config_hash = self._artifacts.config_hash(
-            {
-                "pipeline_id": sub_exp.pipeline_id,
-                "model_type": sub_exp.model_type,
-                "sweep_design": sub_exp.sweep_design,
-                "n_sweep_samples": sub_exp.n_sweep_samples,
-                "compression_method_per_link": compression_method_per_link,
-            }
-        )
-
-        if (
-            not sub_exp.force_retrain
-            and self._artifacts.is_valid(meta_path, config_hash)
-            and pkl_path.exists()
-        ):
-            logger.info("[%s] Reusing cached accuracy model artifact", sub_exp.name)
-            self._load_accuracy_model_from_artifact(sub_exp)
+        if not sub_exp.force_retrain and pkl_path.exists():
+            logger.info(
+                "[%s] Reusing shared accuracy model artifact: %s",
+                sub_exp.name,
+                pkl_path.name,
+            )
+            self._load_accuracy_model_from_artifact(sub_exp, pkl_path)
             return
 
         X, y = await self._run_accuracy_sweep_simulated(sub_exp, pipeline_links)
@@ -679,18 +690,28 @@ class OptRunner:
         model = build_accuracy_model(sub_exp.model_type)
         model.fit(np.array(X), np.array(y))
 
-        # Persist: pickle for the model, JSON for the config hash.
         model.save(pkl_path)
         self._artifacts.write_json(
             meta_path,
-            {"pipeline_id": sub_exp.pipeline_id, "model_type": sub_exp.model_type},
-            config_hash,
+            {
+                "pipeline_id": sub_exp.pipeline_id,
+                "model": pipeline.model,
+                "partitions": pipeline.partitions,
+                "flow": pipeline.flow,
+                "surrogate_type": sub_exp.model_type,
+                "compression_method_per_link": compression_method_per_link,
+                "sweep_design": sub_exp.sweep_design,
+                "n_sweep_samples": sub_exp.n_sweep_samples,
+                "dataset_seed": dataset_cfg.seed,
+                "dataset_max_samples": dataset_cfg.max_samples,
+            },
         )
         logger.info(
-            "[%s] Accuracy model fitted: pipeline=%s samples=%d",
+            "[%s] Accuracy model fitted: pipeline=%s samples=%d artifact=%s",
             sub_exp.name,
             sub_exp.pipeline_id,
             len(y),
+            pkl_path.name,
         )
         self._accuracy_models.setdefault(sub_exp.name, {})[sub_exp.pipeline_id] = model
 
@@ -830,21 +851,19 @@ class OptRunner:
         return result
 
     def _load_accuracy_model_from_artifact(
-        self, sub_exp: AccuracyModelSubExperiment
+        self, sub_exp: AccuracyModelSubExperiment, pkl_path: Path
     ) -> None:
         """Restore an accuracy model from its pickle artifact into the in-memory cache.
 
         Args:
             sub_exp: Accuracy model sub-experiment config.
+            pkl_path: Explicit path to the ``.pkl`` artifact (content-addressed;
+                computed by the caller so we don't recompute the path here).
         """
         from framework.optimizer.accuracy_model import (
             load_accuracy_model,  # noqa: PLC0415
         )
 
-        base_path = self._artifacts.accuracy_model_path(
-            sub_exp.pipeline_id, sub_exp.name
-        )
-        pkl_path = base_path.with_suffix(".pkl")
         try:
             model = load_accuracy_model(pkl_path)
         except Exception as exc:
@@ -916,8 +935,9 @@ class OptRunner:
 
         stein_cfg = getattr(sub_exp, "stein_config", None)
         simulations: dict[str, Any] | None = None
+        owns_simulations = False
         if pre_built_simulations is not None:
-            # Caller already built simulations; reuse them.
+            # Caller already built simulations; reuse them without taking ownership.
             simulations = pre_built_simulations
         elif stein_cfg is not None and not skip_stein:
             from framework.optimizer.simulation_factory import (  # noqa: PLC0415
@@ -930,6 +950,7 @@ class OptRunner:
                 self._mapper,
                 dataset_override=self._exp.stein_datasets,
             )
+            owns_simulations = True
             if not simulations:
                 logger.warning(
                     "[%s] stein_config is set but no pipelines have simulation_path; "
@@ -983,7 +1004,7 @@ class OptRunner:
                 inference_tasks=inference_tasks,
             )
         finally:
-            if simulations:
+            if owns_simulations and simulations:
                 for sim in simulations.values():
                     try:
                         sim.remove_hooks()
@@ -1250,7 +1271,7 @@ async def run_opt_experiment(
 
     await wait_for_multi_nodes_ready(exp, node_host=node_host)
 
-    artifact_store = ArtifactStore(exp.artifacts_dir)
+    artifact_store = ArtifactStore(exp.artifacts_dir, exp.shared_artifacts_dir)
 
     link_prober = LinkProber(
         links=exp.links,

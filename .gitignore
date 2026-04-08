@@ -216,6 +216,9 @@ experiments/*/plots/
 !models/resnet/resnet56-4bfd9763.th
 .partitions/
 
+# Experiment artifacts (profiling, accuracy models, estimator state)
+artifacts/
+
 # Metrics storage
 metrics_data/
 

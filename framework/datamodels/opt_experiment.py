@@ -241,10 +241,10 @@ class AccuracyModelSubExperiment(BaseModel):
         dataset: Dataset slice used exclusively for accuracy evaluation during
             the sweep.  Should use a different seed than the main task dataset
             and the Stein oracle dataset.
-        force_retrain: When ``True`` (default), always run the simulation sweep
-            and fit a new model even if a valid cached artifact exists.  Set to
-            ``False`` to reuse a previously fitted artifact when the config hash
-            matches.
+        force_retrain: When ``True``, always run the simulation sweep and fit a
+            new model even if a valid cached artifact exists.  Defaults to
+            ``False`` — reuses the shared artifact when the content-addressed
+            path already exists.
     """
 
     type: Literal["accuracy_model"] = "accuracy_model"
@@ -254,7 +254,7 @@ class AccuracyModelSubExperiment(BaseModel):
     sweep_design: Literal["diagonal", "random"] = "random"
     n_sweep_samples: int = 60
     dataset: DatasetConfig
-    force_retrain: bool = True
+    force_retrain: bool = False
 
 
 class NoCsiSubExperiment(BaseModel):
@@ -635,6 +635,7 @@ class GeneratedOptExperimentConfig(BaseModel):
     optimization_loop: OptimizationLoopConfig
     metrics_server: MetricsServerConfig
     artifacts_dir: str
+    shared_artifacts_dir: str = "artifacts/shared"
     sub_experiments: list[OptSubExperiment]
 
     @model_validator(mode="after")

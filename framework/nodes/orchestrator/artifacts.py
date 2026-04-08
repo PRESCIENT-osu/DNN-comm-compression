@@ -33,19 +33,41 @@ logger = logging.getLogger(__name__)
 class ArtifactStore:
     """Manages artifact paths and cache validation for one optimization experiment.
 
+    Two roots are maintained:
+    - ``root``: per-experiment directory for profiling, estimator state, and slot
+      summaries.  These depend on live network measurements and are not portable
+      across experiments.
+    - ``shared_root``: experiment-agnostic directory for accuracy model artifacts.
+      Accuracy models depend only on simulation (model, partitions, compression
+      scheme, dataset seed) and are safely shared across experiments that use
+      identical pipeline configs.
+
     Cache validation uses a short SHA-256 hash of the config dict that produced
     the artifact.  On read, the stored hash is compared to the expected hash; a
     mismatch triggers re-computation.  Pass ``expected_hash=None`` to skip the
     check and treat any existing file as valid.
 
     Args:
-        artifacts_dir: Root directory for all artifacts.  Created on init if
-            it does not exist.
+        artifacts_dir: Root directory for per-experiment artifacts.  Created on
+            init if it does not exist.
+        shared_artifacts_dir: Root directory for shared accuracy model artifacts.
+            Defaults to ``artifacts/shared`` relative to the current working
+            directory if not provided.  Created on init if it does not exist.
     """
 
-    def __init__(self, artifacts_dir: Path | str) -> None:
+    def __init__(
+        self,
+        artifacts_dir: Path | str,
+        shared_artifacts_dir: Path | str | None = None,
+    ) -> None:
         self.root = Path(artifacts_dir)
         self.root.mkdir(parents=True, exist_ok=True)
+        self.shared_root = Path(
+            shared_artifacts_dir
+            if shared_artifacts_dir is not None
+            else "artifacts/shared"
+        )
+        self.shared_root.mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------------
     # Path helpers
@@ -75,21 +97,88 @@ class ArtifactStore:
         """
         return self.root / "profiling" / f"a_i_{pipeline_id}_{link_id}.json"
 
-    def accuracy_model_path(self, pipeline_id: str, model_id: str) -> Path:
-        """Path for a serialised accuracy model artifact.
+    def accuracy_model_path(
+        self,
+        model: str,
+        partitions: dict[str, list[str]],
+        flow: list[str],
+        simulation_path: str | None,
+        surrogate_type: str,
+        compression_method_per_link: dict[str, str],
+        sweep_design: str,
+        n_sweep_samples: int,
+        dataset_seed: int | None,
+        dataset_max_samples: int | None,
+    ) -> Path:
+        """Content-addressed path for a shared accuracy model artifact.
 
-        ``.pkl`` suffix is used for surrogate sklearn models; ``.json`` is used
-        for Stein oracle gradient caches.  The caller is responsible for using
-        the correct suffix.
+        The filename encodes the key dimensions of the accuracy model (model
+        family, partition layout, surrogate type, compression scheme) and a
+        short hash of the full uniqueness set so that two experiments using
+        identical pipeline configs and dataset seeds reuse the same artifact.
+
+        Artifacts are stored under ``shared_root/accuracy_models/`` rather than
+        the per-experiment root so they are portable across experiments.
+
+        ``.pkl`` suffix is used for surrogate sklearn models; the caller is
+        responsible for appending the correct suffix.
 
         Args:
-            pipeline_id: Pipeline the model was trained for.
-            model_id: Sub-experiment name used as a unique model identifier.
+            model: Model family string, e.g. ``"resnet"`` or ``"llama"``.
+            partitions: Mapping of node name to list of partition IDs, e.g.
+                ``{"A": ["p1"], "B": ["p2", "p3"], "C": ["p4", "p5"]}``.
+            flow: Ordered node names for this pipeline.
+            simulation_path: Path or name of the full-model checkpoint used by
+                the simulation (affects hook positions for Llama).
+            surrogate_type: sklearn surrogate model type, e.g. ``"gbm"``.
+            compression_method_per_link: ``{link_id: method}`` for each link in
+                flow order, e.g. ``{"A-B": "topk", "B-C": "topk"}``.
+            sweep_design: ``"diagonal"`` or ``"random"``.
+            n_sweep_samples: Number of sweep samples used for training.
+            dataset_seed: RNG seed used for the sweep dataset.
+            dataset_max_samples: Cap on dataset size (affects evaluation cost
+                and training data distribution).
 
         Returns:
-            Base path (without suffix) for the accuracy model artifact.
+            Base path (without suffix) under ``shared_root/accuracy_models/``.
         """
-        return self.root / "accuracy_models" / f"{pipeline_id}_{model_id}"
+        # Human-readable components
+        model_slug = (
+            model.lower().replace("-", "").replace(".", "")
+        )  # e.g. "resnet", "llama318b"
+
+        # Partition layout in flow order: "A.p1_B.p2p3_C.p4p5"
+        partition_parts = []
+        for node in flow:
+            node_parts = "".join(partitions.get(node, []))
+            partition_parts.append(f"{node}.{node_parts}")
+        partition_layout = "_".join(partition_parts)
+
+        # Compression scheme in link flow order: "topk+topk"
+        link_methods = []
+        for i in range(len(flow) - 1):
+            link_id = f"{flow[i]}-{flow[i + 1]}"
+            link_methods.append(compression_method_per_link.get(link_id, "none"))
+        compression_scheme = "+".join(link_methods) if link_methods else "none"
+
+        # Short hash over the full uniqueness set
+        content = {
+            "model": model.lower(),
+            "partitions": {k: sorted(v) for k, v in partitions.items()},
+            "flow": flow,
+            "simulation_path": simulation_path,
+            "surrogate_type": surrogate_type,
+            "compression_method_per_link": compression_method_per_link,
+            "sweep_design": sweep_design,
+            "n_sweep_samples": n_sweep_samples,
+            "dataset_seed": dataset_seed,
+            "dataset_max_samples": dataset_max_samples,
+        }
+        blob = json.dumps(content, sort_keys=True, default=str).encode()
+        content_hash8 = hashlib.sha256(blob).hexdigest()[:8]
+
+        name = f"{model_slug}__{partition_layout}__{surrogate_type}__{compression_scheme}__{content_hash8}"
+        return self.shared_root / "accuracy_models" / name
 
     def estimator_state_path(self, from_node: str, to_node: str) -> Path:
         """Path for the persisted channel estimator state for one link.

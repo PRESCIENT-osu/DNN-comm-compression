@@ -865,6 +865,7 @@ def _materialise_opt(
         "optimization_loop": spec["optimization_loop"],
         "metrics_server": spec["metrics_server"],
         "artifacts_dir": f"artifacts/{exp_name}",
+        "shared_artifacts_dir": "artifacts/shared",
         "sub_experiments": selected,
     }
 
