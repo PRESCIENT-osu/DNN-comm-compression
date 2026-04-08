@@ -20,7 +20,7 @@ from typing import Any, Protocol
 
 import httpx
 
-from framework.datamodels.events import ChannelEstimateQualityEvent, LinkProbeEvent
+from framework.datamodels.events import LinkProbeEvent
 from framework.datamodels.multi_experiment import MultiNodeConfig
 from framework.datamodels.opt_experiment import OptLinkConfig
 from framework.nodes.metrics.emitter import MetricsEmitter
@@ -88,14 +88,13 @@ class LinkProber:
 
     For each link, calls ``POST /probe/measure`` on the sending node; the node
     probes the receiving node and returns ``{rtt_ms, throughput_mbps}``.  The
-    measured throughput is used to update the corresponding channel estimator
-    and emitted as a ``LinkProbeEvent`` and ``ChannelEstimateQualityEvent``.
+    measured throughput is emitted as a ``LinkProbeEvent`` and returned to the
+    caller as raw bps values.  Channel estimation is the responsibility of the
+    optimizer adapter, not the prober.
 
     Args:
         links: Optimization link configs (defines which links to probe).
         nodes: Resolved node configs with host and port.
-        estimators: Per-link channel estimators keyed by ``link_id``
-            (``"{from_node}-{to_node}"``).
         emitter: Metrics emitter for event emission.
         payload_bytes: Size of throughput probe payload in bytes.
     """
@@ -104,7 +103,6 @@ class LinkProber:
         self,
         links: list[OptLinkConfig],
         nodes: list[MultiNodeConfig],
-        estimators: dict[str, ChannelEstimator],
         emitter: MetricsEmitter,
         payload_bytes: int = _DEFAULT_PAYLOAD_BYTES,
     ) -> None:
@@ -113,7 +111,6 @@ class LinkProber:
         self.payload_bytes = payload_bytes
 
         self._node_map: dict[str, MultiNodeConfig] = {n.name: n for n in nodes}
-        self._estimators = estimators
 
     def _node_base_url(self, node_name: str) -> str:
         node = self._node_map[node_name]
@@ -126,15 +123,13 @@ class LinkProber:
         run_id: str,
         sub_experiment_name: str | None = None,
     ) -> dict[str, float]:
-        """Probe all configured links and update channel estimators.
+        """Probe all configured links and return raw throughput measurements.
 
         For each link A→B:
-          1. Snapshot ``c_hat = estimator.estimate()`` before the probe.
-          2. POST to ``http://node-A/probe/measure`` with ``target_base_url``
+          1. POST to ``http://node-A/probe/measure`` with ``target_base_url``
              of node B.
-          3. Compute ``c_actual_bps = throughput_mbps * 1e6``.
-          4. Update the estimator and emit ``LinkProbeEvent`` +
-             ``ChannelEstimateQualityEvent``.
+          2. Compute ``c_actual_bps = throughput_mbps * 1e6``.
+          3. Emit ``LinkProbeEvent``.
 
         Probe failures are logged as warnings and the link is skipped so that
         a single unreachable node does not abort the optimization loop.
@@ -154,14 +149,8 @@ class LinkProber:
         async with httpx.AsyncClient(timeout=_PROBE_TIMEOUT) as client:
             for link in self.links:
                 link_id = link.link_id
-                estimator = self._estimators.get(link_id)
-
                 from_url = self._node_base_url(link.from_node)
                 to_base = self._node_base_url(link.to_node)
-
-                # Snapshot estimator prediction before the probe so the
-                # ChannelEstimateQualityEvent records the pre-probe estimate.
-                c_hat_bps = estimator.estimate() if estimator is not None else 0.0
 
                 try:
                     resp = await client.post(
@@ -185,14 +174,8 @@ class LinkProber:
                     continue
 
                 c_actual_bps = throughput_mbps * 1e6
-
-                # Update estimator with the new observation.
-                if estimator is not None:
-                    estimator.update(c_actual_bps)
-
                 results[link_id] = c_actual_bps
 
-                # Emit raw probe event (consistent with the node background prober).
                 self.emitter.emit(
                     LinkProbeEvent(
                         experiment_id=experiment_id,
@@ -206,57 +189,15 @@ class LinkProber:
                     )
                 )
 
-                # Emit quality event comparing pre-probe estimate to actual.
-                if estimator is not None:
-                    abs_err = abs(c_hat_bps - c_actual_bps)
-                    rel_err = abs_err / c_actual_bps if c_actual_bps > 0 else 0.0
-                    self.emitter.emit(
-                        ChannelEstimateQualityEvent(
-                            experiment_id=experiment_id,
-                            run_id=run_id,
-                            slot_id=slot_id,
-                            from_node=link.from_node,
-                            to_node=link.to_node,
-                            c_hat_bps=c_hat_bps,
-                            c_actual_bps=c_actual_bps,
-                            absolute_error_bps=abs_err,
-                            relative_error=rel_err,
-                            estimator_type=estimator.estimator_type,
-                            n_observations=estimator.n_observations,
-                            sub_experiment_name=sub_experiment_name,
-                        )
-                    )
-
                 logger.debug(
-                    "Probe %s→%s: rtt=%.1fms throughput=%.1fMbps c_hat=%.1fMbps err=%.1f%%",
+                    "Probe %s→%s: rtt=%.1fms throughput=%.1fMbps",
                     link.from_node,
                     link.to_node,
                     rtt_ms,
                     throughput_mbps,
-                    c_hat_bps / 1e6,
-                    (abs(c_hat_bps - c_actual_bps) / c_actual_bps * 100)
-                    if c_actual_bps > 0
-                    else 0.0,
                 )
 
         return results
-
-    def latest_estimates(self) -> dict[str, float]:
-        """Return the current channel capacity estimate for each link.
-
-        Args: (none)
-
-        Returns:
-            Dict mapping ``link_id`` to estimated capacity in bps.
-        """
-        return {
-            link.link_id: (
-                self._estimators[link.link_id].estimate()
-                if link.link_id in self._estimators
-                else 0.0
-            )
-            for link in self.links
-        }
 
 
 # ---------------------------------------------------------------------------

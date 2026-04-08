@@ -76,6 +76,7 @@ from framework.optimizer.accuracy_model import AccuracyModel, build_accuracy_mod
 from framework.optimizer.compression_mapper import CompressionMapper
 from framework.optimizer.inference_optimizer_adapter import (
     BaseOptimizerAdapter,
+    DirectCsiAdapter,
     build_adapter,
     build_global_order,
     build_inference_tasks,
@@ -1006,14 +1007,17 @@ class OptRunner:
         """Execute the optimization slot loop using a BaseOptimizerAdapter.
 
         Each slot:
-          1. Probe links (every link_probe_interval_slots slots).
-          2. Build c_t vector from probe results.
-          3. Call adapter.step(t, c_t) to get eta_per_pipeline_per_link and s_comp_per_node.
-          4. Call adapter.observe_capacity(c_t) to update estimator state.
-          5. Push compression config and WFQ weights to nodes concurrently.
-          6. Submit batches_per_slot tasks and collect SlotResult.
-          7. Emit OptSlotEvent, ThroughputConstraintEvent, TaskAccuracyEvent.
-          8. Call adapter.update_dual(t, actual_delays).
+          1. Probe links.  CSI-aware adapters probe every slot; estimated
+             adapters probe every link_probe_interval_slots slots.  On real
+             probe slots, adapter.observe_capacity(c_t) updates the internal
+             channel estimator.  On non-probe slots, the estimator is not
+             updated and c_t is reused from the last probe (ignored by
+             EstimatedAdapter.step() which uses its own estimate internally).
+          2. Call adapter.step(t, c_t) to get eta_per_pipeline_per_link and s_comp_per_node.
+          3. Push compression config and WFQ weights to nodes concurrently.
+          4. Submit batches_per_slot tasks and collect SlotResult.
+          5. Emit OptSlotEvent, ThroughputConstraintEvent, TaskAccuracyEvent.
+          6. Call adapter.update_dual(t, actual_delays).
 
         Args:
             adapter: Instantiated adapter for this run.
@@ -1030,21 +1034,34 @@ class OptRunner:
 
         cumulative_violations: dict[str, int] = {pid: 0 for pid in pipeline_ids}
 
+        # CSI-aware adapters receive raw c_t on every slot; estimated adapters
+        # probe every link_probe_interval_slots slots and only update their
+        # internal estimator on real probe slots.
+        is_direct = isinstance(adapter, DirectCsiAdapter)
+        last_c_t: np.ndarray | None = None
+
         for slot_id in range(loop_cfg.n_slots):
             # --- 1. Link probe ---
-            probe_bps: dict[str, float] = {}
-            if slot_id % loop_cfg.link_probe_interval_slots == 0:
+            should_probe = is_direct or (
+                slot_id % loop_cfg.link_probe_interval_slots == 0
+            )
+
+            if should_probe:
                 probe_bps = await self._link_prober.probe_all(
                     slot_id=slot_id,
                     experiment_id=self._exp.name,
                     run_id=run_id,
                     sub_experiment_name=sub_exp_name,
                 )
+                c_t = probe_dict_to_c_t_vector(probe_bps, global_order)
+                last_c_t = c_t
+                # Update the adapter's channel estimator with the real measurement.
+                # No-op for DirectCsiAdapter (no internal estimator).
+                adapter.observe_capacity(c_t)
             else:
-                probe_bps = self._link_prober.latest_estimates()
-
-            # --- 2. Build c_t vector ---
-            c_t = probe_dict_to_c_t_vector(probe_bps, global_order)
+                # Non-probe slot for estimated adapters: reuse last probe value.
+                # adapter.step() ignores c_t for EstimatedAdapter (uses internal estimate).
+                c_t = last_c_t  # type: ignore[assignment]
 
             # --- 3. Optimizer step ---
             t_solve_start = time.perf_counter()
@@ -1056,10 +1073,7 @@ class OptRunner:
             # advances them — these are the λ values that drove this slot's decision.
             lambda_per_task = adapter.get_dual_variables()
 
-            # --- 4. Update estimator ---
-            adapter.observe_capacity(c_t)
-
-            # --- 5. Push compression config and WFQ compute-share weights ---
+            # --- 4. Push compression config and WFQ compute-share weights ---
             await asyncio.gather(
                 push_opt_slot_config(
                     eta_per_pipeline_per_link,
@@ -1071,7 +1085,7 @@ class OptRunner:
                 push_wfq_weights(s_comp_per_node, self._exp, self._node_host),
             )
 
-            # --- 6. Run slot ---
+            # --- 5. Run slot ---
             slot_run_id = f"{run_id}_s{slot_id}"
             slot_result = await self._data_client.run_slot(
                 n_batches=loop_cfg.batches_per_slot,
@@ -1083,7 +1097,7 @@ class OptRunner:
                 perplexity_baselines=self._perplexity_baselines,
             )
 
-            # --- 7. Emit events ---
+            # --- 6. Emit events ---
             achieved_rps: dict[str, float] = {}
             d_excess: dict[str, float] = {}
             throughput_shortfall: dict[str, float] = {}
@@ -1171,7 +1185,7 @@ class OptRunner:
                 )
             )
 
-            # --- 8. Dual update ---
+            # --- 7. Dual update ---
             adapter.update_dual(slot_id, actual_delays)
 
             if slot_id % 10 == 0:
@@ -1238,29 +1252,9 @@ async def run_opt_experiment(
 
     artifact_store = ArtifactStore(exp.artifacts_dir)
 
-    # Build estimators for the link prober (uses a neutral moving average
-    # just for the prober's own emission; optimizers build their own).
-    from framework.datamodels.opt_experiment import (  # noqa: PLC0415
-        ChannelEstimatorConfig,
-        ChannelEstimatorHistorySource,
-        ChannelEstimatorType,
-    )
-    from framework.optimizer.channel_estimators import build_estimator  # noqa: PLC0415
-
-    prober_est_cfg = ChannelEstimatorConfig(
-        type=ChannelEstimatorType.MOVING_AVG,
-        window_size=10,
-        history_source=ChannelEstimatorHistorySource.NONE,
-        warmup_value_bps=1.0e8,
-    )
-    prober_estimators = {
-        lk.link_id: build_estimator(prober_est_cfg) for lk in exp.links
-    }
-
     link_prober = LinkProber(
         links=exp.links,
         nodes=exp.nodes,
-        estimators=prober_estimators,
         emitter=emitter,
     )
 
