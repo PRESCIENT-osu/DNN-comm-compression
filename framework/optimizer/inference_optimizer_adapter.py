@@ -21,6 +21,7 @@ from __future__ import annotations
 import logging
 import sys
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -60,6 +61,7 @@ from src.optimizers.csi_aware import (  # noqa: E402
 from src.optimizers.estimators import (  # noqa: E402
     LastObservationEstimator,
     MeanEstimator,
+    MeanMinusZStdLCB,
     MovingAverageEstimator,
     RunningMinEstimator,
 )
@@ -901,67 +903,37 @@ class DualEstimatedAdapter(EstimatedAdapter):
 # ---------------------------------------------------------------------------
 
 
-class _LCBExternalEstimator:
-    """Per-link lower-confidence-bound estimator with the external estimator interface.
+@dataclass
+class WindowedLCBEstimator(MeanMinusZStdLCB):
+    """Sliding-window LCB estimator extending the library's ``MeanMinusZStdLCB``.
 
-    The external estimators in ``src.optimizers.estimators`` do not include an
-    LCB variant.  This class provides a compatible implementation:
-    ``estimate(t)`` returns ``max(0, mean - z * std)`` over the sliding window,
-    and ``update(c_t)`` accepts a per-link numpy vector.
+    ``MeanMinusZStdLCB`` accumulates an unbounded history.  This subclass
+    caps each per-link history to the last ``window`` observations so the
+    estimate adapts to channel changes rather than converging to a global mean.
 
     Args:
         num_links: Number of links (dimension of the c_t vector).
-        window: Sliding window length.
-        z: Confidence multiplier (mean − z·σ).
-        warmup_value: Value returned before any observations.
+        window: Maximum number of recent observations to retain per link.
+        warmup_value: Value returned before any observations (and during the
+            first ``warmup`` slots by the parent class).
+        z: Confidence multiplier: estimate = mean − z·σ.
+        warmup: Number of initial slots for which ``warmup_value`` is returned
+            regardless of observed history.
+        eps: Floor applied to the estimate to prevent zero or negative values.
     """
 
-    def __init__(
-        self,
-        num_links: int,
-        window: int,
-        z: float,
-        warmup_value: float,
-    ) -> None:
-        from collections import deque  # noqa: PLC0415
-
-        self._windows: list[deque[float]] = [
-            deque(maxlen=window) for _ in range(num_links)
-        ]
-        self._z = z
-        self._warmup = warmup_value
+    window: int = 20
 
     def update(self, c_t: np.ndarray) -> None:
-        """Record a new per-link capacity observation.
+        """Record a new per-link capacity observation, retaining only the last ``window``.
 
         Args:
             c_t: Per-link capacity vector of shape ``(num_links,)``.
         """
-        for i, v in enumerate(c_t):
-            self._windows[i].append(float(v))
-
-    def estimate(self, t: int) -> np.ndarray:  # noqa: ARG002
-        """Return mean − z·σ per link over the current window.
-
-        Args:
-            t: Current slot index (unused; kept for interface compatibility).
-
-        Returns:
-            Per-link capacity estimate array of shape ``(num_links,)``.
-        """
-        import statistics  # noqa: PLC0415
-
-        result = []
-        for w in self._windows:
-            if len(w) == 0:
-                result.append(self._warmup)
-            elif len(w) == 1:
-                result.append(float(w[0]))
-            else:
-                mu = statistics.mean(w)
-                sigma = statistics.stdev(w)
-                result.append(max(0.0, mu - self._z * sigma))
-        return np.array(result, dtype=float)
+        super().update(c_t)
+        for i in range(self.num_links):
+            if len(self._hist[i]) > self.window:
+                self._hist[i] = self._hist[i][-self.window :]
 
 
 def _build_external_estimator(
@@ -970,9 +942,8 @@ def _build_external_estimator(
 ) -> Any:
     """Build an external estimator for use inside an optimizer adapter.
 
-    The external estimators in ``src.optimizers.estimators`` expose
-    ``estimate(t) -> np.ndarray`` and ``update(c_t: np.ndarray)``.  For LCB,
-    a local implementation is used because the library does not provide one.
+    Dispatches to the appropriate class from ``src.optimizers.estimators`` or
+    to ``WindowedLCBEstimator`` for the windowed LCB variant.
 
     Args:
         cfg: Channel estimator config from the sub-experiment.
@@ -1000,11 +971,18 @@ def _build_external_estimator(
         )
 
     if cfg.type == ChannelEstimatorType.LCB:
-        return _LCBExternalEstimator(
+        return MeanMinusZStdLCB(
             num_links=num_links,
-            window=cfg.window_size or 20,
-            z=cfg.z or 1.0,
             warmup_value=warmup,
+            z=cfg.z,
+        )
+
+    if cfg.type == ChannelEstimatorType.WINDOWED_LCB:
+        return WindowedLCBEstimator(
+            num_links=num_links,
+            warmup_value=warmup,
+            z=cfg.z,
+            window=cfg.window_size,
         )
 
     raise ValueError(f"Unsupported channel estimator type: {cfg.type!r}")

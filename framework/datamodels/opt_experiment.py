@@ -141,6 +141,7 @@ class ChannelEstimatorType(StrEnum):
     RUNNING_MIN = "running_min"
     MOVING_AVG = "moving_average"
     LCB = "lcb"
+    WINDOWED_LCB = "windowed_lcb"
 
 
 class ChannelEstimatorHistorySource(StrEnum):
