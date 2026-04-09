@@ -22,6 +22,7 @@ done
 
 if [ "$has_tc" = true ]; then
     echo "[entrypoint] Configuring per-link tc rules on eth0"
+    tc qdisc del dev eth0 root 2>/dev/null || true
     tc qdisc add dev eth0 root handle 1: htb default 99
     tc class add dev eth0 parent 1: classid 1:99 htb rate 1000mbit
 
