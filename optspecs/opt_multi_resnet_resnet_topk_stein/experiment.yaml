@@ -41,7 +41,6 @@ datasets:
     path: .datasets/cifar10
     batch_size: 100
     max_in_flight: 4
-    max_samples: 10
     seed: 42
 
 # Dataset slices used exclusively by the Stein oracle during optimization.

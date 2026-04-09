@@ -1,0 +1,119 @@
+sub_experiments:
+
+  - name: profiling
+    type: profiling
+
+  - name: accuracy_model_resnet_gbm
+    type: accuracy_model
+    pipeline_id: resnet-a
+    model_type: gbm
+    sweep_design: random
+    n_sweep_samples: 100
+    dataset:
+      name: cifar10
+      path: .datasets/cifar10
+      batch_size: 25
+      max_samples: 100
+      seed: 100
+
+  - name: accuracy_model_resnet_poly2
+    type: accuracy_model
+    pipeline_id: resnet-a
+    model_type: poly2
+    sweep_design: random
+    n_sweep_samples: 100
+    dataset:
+      name: cifar10
+      path: .datasets/cifar10
+      batch_size: 25
+      max_samples: 100
+      seed: 100
+
+  - name: accuracy_model_resnet_poly3
+    type: accuracy_model
+    pipeline_id: resnet-a
+    model_type: poly3
+    sweep_design: random
+    n_sweep_samples: 100
+    dataset:
+      name: cifar10
+      path: .datasets/cifar10
+      batch_size: 25
+      max_samples: 100
+      seed: 100
+
+  - name: accuracy_model_resnet_rf
+    type: accuracy_model
+    pipeline_id: resnet-a
+    model_type: rf
+    sweep_design: random
+    n_sweep_samples: 100
+    dataset:
+      name: cifar10
+      path: .datasets/cifar10
+      batch_size: 25
+      max_samples: 100
+      seed: 100
+
+  - name: accuracy_model_resnet_mlp
+    type: accuracy_model
+    pipeline_id: resnet-a
+    model_type: mlp
+    sweep_design: random
+    n_sweep_samples: 100
+    dataset:
+      name: cifar10
+      path: .datasets/cifar10
+      batch_size: 25
+      max_samples: 100
+      seed: 100
+
+  - name: no_csi_mu_sweep_am_gbm
+    type: no_csi
+    mu_sweep: [0.5, 4.0, 10.0]
+    accuracy_model_refs:
+      - accuracy_model_resnet_gbm
+    channel_estimator:
+      type: moving_average
+      window_size: 10
+      warmup_value_bps: 1.0e8
+
+  - name: no_csi_mu_sweep_am_poly2
+    type: no_csi
+    mu_sweep: [0.5, 4.0, 10.0]
+    accuracy_model_refs:
+      - accuracy_model_resnet_poly2
+    channel_estimator:
+      type: moving_average
+      window_size: 10
+      warmup_value_bps: 1.0e8
+
+  - name: no_csi_mu_sweep_am_poly3
+    type: no_csi
+    mu_sweep: [0.5, 4.0, 10.0]
+    accuracy_model_refs:
+      - accuracy_model_resnet_poly3
+    channel_estimator:
+      type: moving_average
+      window_size: 10
+      warmup_value_bps: 1.0e8
+
+  - name: no_csi_mu_sweep_am_rf
+    type: no_csi
+    mu_sweep: [0.5, 4.0, 10.0]
+    accuracy_model_refs:
+      - accuracy_model_resnet_rf
+    channel_estimator:
+      type: moving_average
+      window_size: 10
+      warmup_value_bps: 1.0e8
+
+  - name: no_csi_mu_sweep_am_mlp
+    type: no_csi
+    mu_sweep: [0.5, 4.0, 10.0]
+    accuracy_model_refs:
+      - accuracy_model_resnet_mlp
+    channel_estimator:
+      type: moving_average
+      window_size: 10
+      warmup_value_bps: 1.0e8

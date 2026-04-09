@@ -21,14 +21,13 @@ datasets:
     path: .datasets/cifar10
     batch_size: 100
     max_in_flight: 4
-    max_samples: 10
     seed: 42
 
 stein_datasets:
   resnet:
     name: cifar10
     path: .datasets/cifar10
-    batch_size: 25
+    batch_size: 10
     max_samples: 60
     seed: 200
 

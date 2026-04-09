@@ -19,14 +19,14 @@ pipelines:
     flow: [A, B, C]
     simulation_path: models/resnet/resnet56-4bfd9763.th
 
-  - name: llama-mmlu-a
-    model: llama
+  - name: resnet-b
+    model: resnet
     partitions:
       A: [p1]
-      B: [p2]
-      C: [p3]
+      B: [p2, p3]
+      C: [p4, p5]
     flow: [A, B, C]
-    simulation_path: models/llama/llama-3.1-8b
+    simulation_path: models/resnet/resnet56-4bfd9763.th
 
 datasets:
   resnet:
@@ -34,22 +34,6 @@ datasets:
     path: .datasets/cifar10
     batch_size: 100
     max_in_flight: 4
-    max_samples: 10
-    seed: 42
-  llama:
-    name: mmlu
-    path: .datasets/mmlu
-    tokenizer_path: models/llama/.partitions/tokenizer
-    batch_size: 4
-    max_in_flight: 4
-    subjects:
-      - college_computer_science
-      - high_school_mathematics
-      - professional_law
-      - global_facts
-      - miscellaneous
-      - business_ethics
-    samples_per_subject: 10
     seed: 42
 
 workload:
@@ -57,16 +41,16 @@ workload:
   window_per_pipeline: 4
   mix:
     resnet-a: 0.5
-    llama-mmlu-a: 0.5
+    resnet-b: 0.5
 
 # Per-pipeline throughput targets (R_k) and WFQ compute share weights (s_comp).
 tasks:
   resnet-a:
     throughput_target: 5.0   # tasks/second
     task_weight: 0.4         # proportional WFQ weight
-  llama-mmlu-a:
-    throughput_target: 0.2
-    task_weight: 0.6
+  resnet-b:
+    throughput_target: 5.0   # tasks/second
+    task_weight: 0.4 
 
 # Per-link optimization search space.  The optimizer selects η ∈ [eta_min, eta_max]
 # from the allowed_methods each slot.
@@ -80,7 +64,7 @@ links:
       resnet-a:
         outlier_precision: fp16
         regular_precision: int8
-      llama-mmlu-a:
+      resnet-b:
         outlier_precision: fp16
         regular_precision: int8
 
@@ -93,7 +77,7 @@ links:
       resnet-a:
         outlier_precision: fp16
         regular_precision: int8
-      llama-mmlu-a:
+      resnet-b:
         outlier_precision: fp16
         regular_precision: int8
 

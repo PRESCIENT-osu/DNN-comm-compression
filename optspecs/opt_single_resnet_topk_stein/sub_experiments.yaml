@@ -3,17 +3,40 @@ sub_experiments:
   - name: profiling
     type: profiling
 
-  - name: no_csi_mu_sweep
+  - name: no_csi_mu_sweep_ce_ma
     type: no_csi
     mu_sweep: [0.5, 4.0, 10.0]
     stein_config:
       sigma: 0.05
       N: 20
-      n_fast_samples: 60
+      n_fast_samples: 20
     channel_estimator:
       type: moving_average
       window_size: 10
-      history_source: metrics_server
+      warmup_value_bps: 1.0e8
+
+  - name: no_csi_mu_sweep_ce_lcb
+    type: no_csi
+    mu_sweep: [0.5, 4.0, 10.0]
+    stein_config:
+      sigma: 0.05
+      N: 20
+      n_fast_samples: 20
+    channel_estimator:
+      type: lcb
+      window_size: 10
+      z: 1.5
+      warmup_value_bps: 1.0e8
+
+  - name: no_csi_mu_sweep_ce_mean
+    type: no_csi
+    mu_sweep: [0.5, 4.0, 10.0]
+    stein_config:
+      sigma: 0.05
+      N: 20
+      n_fast_samples: 20
+    channel_estimator:
+      type: mean
       warmup_value_bps: 1.0e8
 
   - name: csi_aware
@@ -32,4 +55,16 @@ sub_experiments:
     type: estimated_csi_single
     channel_estimator:
       type: last_observation
+      warmup_value_bps: 1.0e8
+
+  - name: conservative_single
+    type: estimated_csi_single
+    channel_estimator:
+      type: running_min
+      warmup_value_bps: 1.0e8
+
+  - name: movingavg_single
+    type: estimated_csi_single
+    channel_estimator:
+      type: moving_average
       warmup_value_bps: 1.0e8

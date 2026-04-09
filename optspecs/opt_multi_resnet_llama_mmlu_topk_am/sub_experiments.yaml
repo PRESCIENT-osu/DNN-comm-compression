@@ -35,7 +35,7 @@ sub_experiments:
       name: cifar10
       path: .datasets/cifar10
       batch_size: 25
-      max_samples: 10
+      max_samples: 100
       seed: 100
 
   - name: accuracy_model_llama

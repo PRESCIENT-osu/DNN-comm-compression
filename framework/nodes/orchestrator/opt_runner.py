@@ -460,6 +460,16 @@ class OptRunner:
         )
 
         run_id = f"{self._exp.name}_{sub_exp.name}"
+
+        # Warm-up: one untimed batch so CUDA JIT compiles before timed profiling.
+        # Use a distinct run_id so these events are excluded from _query_tau_and_a.
+        await self._data_client.run_slot(
+            n_batches=1,
+            run_id=f"{run_id}_warmup",
+            node_host=self._node_host,
+            emitter=self._emitter,
+        )
+
         slot_result = await self._data_client.run_slot(
             n_batches=self._exp.optimization_loop.profiling_batches,
             run_id=run_id,
@@ -493,8 +503,9 @@ class OptRunner:
 
         # Query per-node compute times and per-link activation sizes from
         # the metrics server.  These are needed by InferenceTask construction
-        # in the external optimizer adapter.  Queried after the slot so that
-        # nodes have had time to emit and flush their events.
+        # in the external optimizer adapter.  Brief sleep first to allow nodes
+        # to flush their async metric events before we query.
+        await asyncio.sleep(2.0)
         tau_per_node, a_per_link = await self._query_tau_and_a(
             run_id=run_id,
             experiment_id=self._exp.name,
@@ -1184,6 +1195,7 @@ class OptRunner:
                         compression_rate=comp_rate,
                         accuracy=acc,
                         n_samples=len(slot_result.per_pipeline_latency_ms.get(pid, [])),
+                        eta_per_link=eta_per_pipeline_per_link.get(pid),
                         slot_id=slot_id,
                         sub_experiment_name=sub_exp_name,
                     )

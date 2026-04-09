@@ -141,7 +141,6 @@ class ChannelEstimatorType(StrEnum):
     RUNNING_MIN = "running_min"
     MOVING_AVG = "moving_average"
     LCB = "lcb"
-    WINDOWED_LCB = "windowed_lcb"
 
 
 class ChannelEstimatorHistorySource(StrEnum):
@@ -158,11 +157,9 @@ class ChannelEstimatorConfig(BaseModel):
     Args:
         type: Estimator algorithm.
         window_size: Number of recent observations to retain.  Used by
-            ``moving_average`` and ``windowed_lcb`` only.  Ignored for ``lcb``
-            (which uses the library's ``MeanMinusZStdLCB`` with unbounded
-            history) and for all other estimator types.
+            ``moving_average`` and ``lcb``.  Ignored for all other types.
         z: LCB confidence width: estimate = mean - z * std.  Applies to
-            ``lcb`` and ``windowed_lcb`` only.
+            ``lcb`` only.
         history_source: Where to load past probe observations for warm-up.
         experiment_name_contains: Substring filter applied to experiment_id when
             querying the metrics server for probe history.  Injected by the

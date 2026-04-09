@@ -8,8 +8,8 @@ sub_experiments:
     mu_sweep: [0.5, 4.0, 10.0]
     stein_config:
       sigma: 0.05
-      N: 20
-      n_fast_samples: 30
+      N: 5
+      n_fast_samples: 10
     channel_estimator:
       type: moving_average
       window_size: 10
