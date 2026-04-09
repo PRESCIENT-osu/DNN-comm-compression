@@ -677,8 +677,8 @@ class OptRunner:
             dataset_seed=dataset_cfg.seed,
             dataset_max_samples=dataset_cfg.max_samples,
         )
-        pkl_path = base_path.with_suffix(".pkl")
-        meta_path = base_path.with_suffix(".json")
+        pkl_path = base_path.parent / (base_path.name + ".pkl")
+        meta_path = base_path.parent / (base_path.name + ".json")
 
         if not sub_exp.force_retrain and pkl_path.exists():
             logger.info(
