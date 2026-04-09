@@ -777,12 +777,10 @@ def _opt_orchestrator_job(
         Job manifest dict.
     """
     job_name = f"{exp.name.lower().replace('_', '-')}-orchestrator"
-    container_artifacts = _abs_container_path(exp.artifacts_dir)
-
     volume_mounts: list[dict[str, Any]] = [
         {"name": "experiment-dir", "mountPath": "/app/experiments", "readOnly": True},
         {"name": "datasets", "mountPath": "/app/.datasets"},
-        {"name": "artifacts", "mountPath": container_artifacts},
+        {"name": "artifacts", "mountPath": "/app/artifacts"},
     ]
     volumes: list[dict[str, Any]] = [
         {

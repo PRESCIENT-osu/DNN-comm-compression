@@ -322,7 +322,7 @@ def generate_opt(
     orchestrator_volumes = [
         f"{experiment_config_path.parent.parent.resolve()}:/app/experiments:ro",
         f"{dataset_base_dir.resolve()}:/app/.datasets",
-        f"{artifacts_dir.resolve()}:/app/{exp.artifacts_dir}",
+        f"{artifacts_dir.resolve()}:/app/artifacts",
     ]
     for dataset_cfg in exp.datasets.values():
         if dataset_cfg.tokenizer_path is not None:

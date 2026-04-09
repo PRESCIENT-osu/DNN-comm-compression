@@ -91,8 +91,9 @@ def main() -> None:
         type=Path,
         default=Path("artifacts"),
         help=(
-            "Host path for optimizer artifact storage — profiling results, "
-            "accuracy models, estimator state (--opt only, default: artifacts/)"
+            "Host path for optimizer artifact root — per-experiment profiling/estimator "
+            "state and shared accuracy models are written as subdirectories here "
+            "(--opt only, default: artifacts/)"
         ),
     )
     parser.add_argument(
