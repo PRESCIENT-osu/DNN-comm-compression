@@ -8,12 +8,12 @@ sub_experiments:
     pipeline_id: resnet-a
     model_type: gbm
     sweep_design: random
-    n_sweep_samples: 100
+    n_sweep_samples: 1000
     dataset:
       name: cifar10
       path: .datasets/cifar10
       batch_size: 25
-      max_samples: 100
+      max_samples: 1000
       seed: 100
 
   - name: accuracy_model_resnet_poly2
@@ -21,12 +21,12 @@ sub_experiments:
     pipeline_id: resnet-a
     model_type: poly2
     sweep_design: random
-    n_sweep_samples: 100
+    n_sweep_samples: 1000
     dataset:
       name: cifar10
       path: .datasets/cifar10
       batch_size: 25
-      max_samples: 100
+      max_samples: 1000
       seed: 100
 
   - name: accuracy_model_resnet_poly3
@@ -34,7 +34,7 @@ sub_experiments:
     pipeline_id: resnet-a
     model_type: poly3
     sweep_design: random
-    n_sweep_samples: 100
+    n_sweep_samples: 1000
     dataset:
       name: cifar10
       path: .datasets/cifar10
@@ -47,12 +47,12 @@ sub_experiments:
     pipeline_id: resnet-a
     model_type: rf
     sweep_design: random
-    n_sweep_samples: 100
+    n_sweep_samples: 1000
     dataset:
       name: cifar10
       path: .datasets/cifar10
       batch_size: 25
-      max_samples: 100
+      max_samples: 1000
       seed: 100
 
   - name: accuracy_model_resnet_mlp
@@ -60,12 +60,12 @@ sub_experiments:
     pipeline_id: resnet-a
     model_type: mlp
     sweep_design: random
-    n_sweep_samples: 100
+    n_sweep_samples: 1000
     dataset:
       name: cifar10
       path: .datasets/cifar10
       batch_size: 25
-      max_samples: 100
+      max_samples: 1000
       seed: 100
 
   - name: no_csi_mu_sweep_am_gbm

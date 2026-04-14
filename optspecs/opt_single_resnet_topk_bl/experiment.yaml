@@ -20,7 +20,6 @@ datasets:
     name: cifar10
     path: .datasets/cifar10
     batch_size: 100
-    max_in_flight: 4
     seed: 42
 
 workload:
@@ -31,7 +30,7 @@ workload:
 
 tasks:
   resnet-a:
-    throughput_target: 5.0
+    throughput_target: 2.0
     task_weight: 1.0
 
 links:
@@ -49,10 +48,10 @@ links:
 
 optimization_loop:
   n_slots: 50
-  batches_per_slot: 4
+  batches_per_slot: 20
   profiling_batches: 4
-  link_probe_interval_slots: 1
-  epsilon: 0.01
+  link_probe_interval_slots: 5
+  epsilon: 0.1
 
 metrics_server:
   host: metrics

@@ -1,0 +1,31 @@
+sub_experiments:
+
+  - name: profiling
+    type: profiling
+
+  - name: max_compression_single
+    type: max_compression_single
+
+  - name: no_compression_single
+    type: no_compression_single
+
+  - name: uniform_compression_single
+    type: uniform_compression_single
+
+  - name: myopic_single
+    type: estimated_csi_single
+    channel_estimator:
+      type: last_observation
+      warmup_value_bps: 1.0e8
+
+  - name: conservative_single
+    type: estimated_csi_single
+    channel_estimator:
+      type: running_min
+      warmup_value_bps: 1.0e8
+
+  - name: movingavg_single
+    type: estimated_csi_single
+    channel_estimator:
+      type: moving_average
+      warmup_value_bps: 1.0e8

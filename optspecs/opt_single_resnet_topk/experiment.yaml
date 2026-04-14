@@ -1,0 +1,186 @@
+# Optimization experiment spec: ResNet56 single-pipeline, top-k compression
+
+nodes:
+  - A
+  - B
+  - C
+
+pipelines:
+  - name: resnet-a
+    model: resnet
+    partitions:
+      A: [p1]
+      B: [p2, p3]
+      C: [p4, p5]
+    flow: [A, B, C]
+    simulation_path: models/resnet/resnet56-4bfd9763.th
+
+datasets:
+  resnet:
+    name: cifar10
+    path: .datasets/cifar10
+    batch_size: 100
+    seed: 42
+
+stein_datasets:
+  resnet:
+    name: cifar10
+    path: .datasets/cifar10
+    batch_size: 10
+    max_samples: 1000
+    seed: 200
+
+workload:
+  pattern: fill
+  window_per_pipeline: 4
+  mix:
+    resnet-a: 1.0
+
+tasks:
+  resnet-a:
+    throughput_target: 2.0
+    task_weight: 1.0
+
+links:
+  - from: A
+    to: B
+    eta_min: 0.01
+    eta_max: 1.0
+    allowed_methods: [topk]
+
+  - from: B
+    to: C
+    eta_min: 0.01
+    eta_max: 1.0
+    allowed_methods: [topk]
+
+optimization_loop:
+  n_slots: 50
+  batches_per_slot: 20
+  profiling_batches: 4
+  link_probe_interval_slots: 5
+  epsilon: 0.1
+
+metrics_server:
+  host: metrics
+  port: 9100
+
+sub_experiments:
+
+  - name: profiling
+    type: profiling
+
+  - name: accuracy_model_resnet_gbm
+    type: accuracy_model
+    pipeline_id: resnet-a
+    model_type: gbm
+    sweep_design: random
+    n_sweep_samples: 1000
+    dataset:
+      name: cifar10
+      path: .datasets/cifar10
+      batch_size: 25
+      max_samples: 1000
+      seed: 100
+
+  - name: accuracy_model_resnet_poly2
+    type: accuracy_model
+    pipeline_id: resnet-a
+    model_type: poly2
+    sweep_design: random
+    n_sweep_samples: 1000
+    dataset:
+      name: cifar10
+      path: .datasets/cifar10
+      batch_size: 25
+      max_samples: 1000
+      seed: 100
+
+  - name: accuracy_model_resnet_poly3
+    type: accuracy_model
+    pipeline_id: resnet-a
+    model_type: poly3
+    sweep_design: random
+    n_sweep_samples: 1000
+    dataset:
+      name: cifar10
+      path: .datasets/cifar10
+      batch_size: 25
+      max_samples: 100
+      seed: 100
+
+  - name: accuracy_model_resnet_rf
+    type: accuracy_model
+    pipeline_id: resnet-a
+    model_type: rf
+    sweep_design: random
+    n_sweep_samples: 1000
+    dataset:
+      name: cifar10
+      path: .datasets/cifar10
+      batch_size: 25
+      max_samples: 1000
+      seed: 100
+
+  - name: accuracy_model_resnet_mlp
+    type: accuracy_model
+    pipeline_id: resnet-a
+    model_type: mlp
+    sweep_design: random
+    n_sweep_samples: 1000
+    dataset:
+      name: cifar10
+      path: .datasets/cifar10
+      batch_size: 25
+      max_samples: 1000
+      seed: 100
+
+  - name: max_compression_single
+    type: max_compression_single
+
+  - name: no_compression_single
+    type: no_compression_single
+
+  - name: uniform_compression_single
+    type: uniform_compression_single
+
+  - name: myopic_single
+    type: estimated_csi_single
+    channel_estimator:
+      type: last_observation
+      warmup_value_bps: 1.0e8
+
+  - name: conservative_single
+    type: estimated_csi_single
+    channel_estimator:
+      type: running_min
+      warmup_value_bps: 1.0e8
+
+  - name: movingavg_single
+    type: estimated_csi_single
+    channel_estimator:
+      type: moving_average
+      warmup_value_bps: 1.0e8
+      
+  - name: csi_aware
+    type: csi_aware
+
+  - name: no_csi_mu_4_am_mlp
+    type: no_csi
+    mu_sweep: [4.0]
+    accuracy_model_refs:
+      - accuracy_model_resnet_mlp
+    channel_estimator:
+      type: lcb
+      warmup_value_bps: 1.0e8
+
+  - name: no_csi_mu_4_stein_ce_lcb
+    type: no_csi
+    mu_sweep: [4.0]
+    stein_config:
+      sigma: 0.05
+      N: 10
+      n_fast_samples: 100
+    channel_estimator:
+      type: lcb
+      warmup_value_bps: 1.0e8

@@ -691,10 +691,16 @@ def load_opt_spec(spec_dir: Path) -> dict[str, Any]:
 
 
 def load_opt_sub_experiments(spec_dir: Path) -> list[dict[str, Any]]:
-    """Load sub-experiments from optspecs/<name>/sub_experiments.yaml.
+    """Load sub-experiments for an optspec.
 
     Unlike multispecs (which use a named dict), opt sub-experiments are an
     ordered list because execution order is semantically meaningful.
+
+    Two layouts are supported:
+    - Separate file: ``sub_experiments.yaml`` alongside ``experiment.yaml``.
+    - Combined file: ``sub_experiments`` key inside ``experiment.yaml``.
+
+    The separate file takes precedence if both are present.
 
     Args:
         spec_dir: Path to the optspec directory.
@@ -703,13 +709,23 @@ def load_opt_sub_experiments(spec_dir: Path) -> list[dict[str, Any]]:
         Ordered list of sub-experiment config dicts.
 
     Raises:
-        FileNotFoundError: If sub_experiments.yaml is not found.
+        FileNotFoundError: If neither source provides sub-experiments.
     """
-    yaml_path = spec_dir / "sub_experiments.yaml"
-    if not yaml_path.exists():
-        raise FileNotFoundError(f"Opt sub_experiments not found: {yaml_path}")
-    data = _load_yaml(yaml_path)
-    return data.get("sub_experiments", [])
+    sub_yaml = spec_dir / "sub_experiments.yaml"
+    if sub_yaml.exists():
+        data = _load_yaml(sub_yaml)
+        return data.get("sub_experiments", [])
+
+    exp_yaml = spec_dir / "experiment.yaml"
+    if exp_yaml.exists():
+        data = _load_yaml(exp_yaml)
+        if "sub_experiments" in data:
+            return data["sub_experiments"]
+
+    raise FileNotFoundError(
+        f"Opt sub_experiments not found for spec '{spec_dir}': "
+        f"provide sub_experiments.yaml or a sub_experiments key in experiment.yaml"
+    )
 
 
 def validate_opt_compatibility(spec: dict[str, Any], profile: dict[str, Any]) -> None:
@@ -880,17 +896,30 @@ def _materialise_opt(
 
 
 def _leaf_opt_specs() -> list[Path]:
-    """Return all optspec directories that have both required YAML files.
+    """Return all optspec directories that have a resolvable sub-experiments source.
+
+    Accepts either a separate ``sub_experiments.yaml`` or a ``sub_experiments``
+    key inside ``experiment.yaml``.
 
     Returns:
         Sorted list of valid optspec directory paths.
     """
     if not OPTSPECS_DIR.exists():
         return []
+
+    def _has_sub_experiments(spec_dir: Path) -> bool:
+        if (spec_dir / "sub_experiments.yaml").exists():
+            return True
+        exp_yaml = spec_dir / "experiment.yaml"
+        if exp_yaml.exists():
+            data = _load_yaml(exp_yaml)
+            return "sub_experiments" in data
+        return False
+
     candidates = sorted(
         p.parent
         for p in OPTSPECS_DIR.rglob("experiment.yaml")
-        if (p.parent / "sub_experiments.yaml").exists()
+        if _has_sub_experiments(p.parent)
     )
     return candidates
 

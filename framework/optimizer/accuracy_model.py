@@ -257,6 +257,8 @@ class SurrogateAccuracyModel(AccuracyModel):
         self._poly: Any = None
         self._n_features: int | None = None
         self._metrics: dict[str, float] = {}
+        self._X_train: np.ndarray | None = None
+        self._y_train: np.ndarray | None = None
 
     def fit(self, X: np.ndarray, y: np.ndarray) -> None:
         """Fit the surrogate model from (η_vector, accuracy) training data.
@@ -321,6 +323,8 @@ class SurrogateAccuracyModel(AccuracyModel):
         if self._poly is not None:
             X_all_s = self._poly.fit_transform(X_all_s)
         self._model.fit(X_all_s, y)
+        self._X_train = X.copy()
+        self._y_train = y.copy()
 
     def predict(self, eta: np.ndarray) -> float:
         """Evaluate the fitted model at the given per-link η vector.
@@ -354,6 +358,8 @@ class SurrogateAccuracyModel(AccuracyModel):
             "poly": self._poly,
             "model": self._model,
             "metrics": self._metrics,
+            "X_train": self._X_train,
+            "y_train": self._y_train,
         }
         with open(path, "wb") as f:
             pickle.dump(payload, f)
@@ -378,6 +384,8 @@ class SurrogateAccuracyModel(AccuracyModel):
         m._poly = d.get("poly")
         m._model = d["model"]
         m._metrics = d.get("metrics", {})
+        m._X_train = d.get("X_train")
+        m._y_train = d.get("y_train")
         logger.debug(
             "Loaded SurrogateAccuracyModel ← %s (type=%s n_links=%s)",
             path,

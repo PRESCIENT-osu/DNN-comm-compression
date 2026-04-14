@@ -76,7 +76,6 @@ from framework.optimizer.accuracy_model import AccuracyModel, build_accuracy_mod
 from framework.optimizer.compression_mapper import CompressionMapper
 from framework.optimizer.inference_optimizer_adapter import (
     BaseOptimizerAdapter,
-    DirectCsiAdapter,
     build_adapter,
     build_global_order,
     build_inference_tasks,
@@ -1066,15 +1065,13 @@ class OptRunner:
 
         cumulative_violations: dict[str, int] = {pid: 0 for pid in pipeline_ids}
 
-        # CSI-aware adapters receive raw c_t on every slot; estimated adapters
-        # probe every link_probe_interval_slots slots and only update their
-        # internal estimator on real probe slots.
-        is_direct = isinstance(adapter, DirectCsiAdapter)
+        # CSI-aware adapters probe every slot (probe_every_slot=True); all other
+        # adapters probe every link_probe_interval_slots slots.
         last_c_t: np.ndarray | None = None
 
         for slot_id in range(loop_cfg.n_slots):
             # --- 1. Link probe ---
-            should_probe = is_direct or (
+            should_probe = adapter.probe_every_slot or (
                 slot_id % loop_cfg.link_probe_interval_slots == 0
             )
 

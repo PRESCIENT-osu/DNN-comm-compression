@@ -632,6 +632,7 @@ class BaseOptimizerAdapter(ABC):
         self._pipeline_to_task_id = pipeline_to_task_id
         self._global_order = global_order
         self._exp = exp
+        self.probe_every_slot: bool = False
 
     @abstractmethod
     def step(
@@ -757,11 +758,13 @@ class DirectCsiAdapter(BaseOptimizerAdapter):
         pipeline_to_task_id: dict[str, int],
         global_order: list[str],
         exp: GeneratedOptExperimentConfig,
+        probe_every_slot: bool = False,
     ) -> None:
         super().__init__(
             inference_tasks, task_id_to_pipeline, pipeline_to_task_id, global_order, exp
         )
         self._optimizer = optimizer
+        self.probe_every_slot = probe_every_slot
 
     def step(
         self, t: int, c_t: np.ndarray
@@ -952,37 +955,44 @@ def _build_external_estimator(
     Returns:
         An estimator instance with ``estimate(t)`` and ``update(c_t)`` methods.
     """
-    warmup = float(cfg.warmup_value_bps)
+    warmup_kwargs: dict[str, float] = (
+        {"warmup_value": float(cfg.warmup_value_bps)}
+        if cfg.warmup_value_bps is not None
+        else {}
+    )
 
     if cfg.type == ChannelEstimatorType.LAST_OBS:
-        return LastObservationEstimator(num_links=num_links, warmup_value=warmup)
+        return LastObservationEstimator(num_links=num_links, **warmup_kwargs)
 
     if cfg.type == ChannelEstimatorType.MEAN:
-        return MeanEstimator(num_links=num_links, warmup_value=warmup)
+        if not warmup_kwargs:
+            raise ValueError(
+                "warmup_value_bps is required for channel_estimator type 'mean'"
+            )
+        return MeanEstimator(num_links=num_links, **warmup_kwargs)
 
     if cfg.type == ChannelEstimatorType.RUNNING_MIN:
-        return RunningMinEstimator(num_links=num_links, warmup_value=warmup)
+        return RunningMinEstimator(num_links=num_links, **warmup_kwargs)
 
     if cfg.type == ChannelEstimatorType.MOVING_AVG:
+        window_kwargs: dict[str, int] = (
+            {"window": cfg.window_size} if cfg.window_size is not None else {}
+        )
         return MovingAverageEstimator(
-            num_links=num_links,
-            window=cfg.window_size,
-            warmup_value=warmup,
+            num_links=num_links, **warmup_kwargs, **window_kwargs
         )
 
     if cfg.type == ChannelEstimatorType.LCB:
-        return MeanMinusZStdLCB(
-            num_links=num_links,
-            warmup_value=warmup,
-            z=cfg.z,
-        )
+        z_kwargs: dict[str, float] = {"z": cfg.z} if cfg.z is not None else {}
+        return MeanMinusZStdLCB(num_links=num_links, **warmup_kwargs, **z_kwargs)
 
     if cfg.type == ChannelEstimatorType.WINDOWED_LCB:
+        z_kwargs = {"z": cfg.z} if cfg.z is not None else {}
+        window_kwargs = (
+            {"window": cfg.window_size} if cfg.window_size is not None else {}
+        )
         return WindowedLCBEstimator(
-            num_links=num_links,
-            warmup_value=warmup,
-            z=cfg.z,
-            window=cfg.window_size,
+            num_links=num_links, **warmup_kwargs, **z_kwargs, **window_kwargs
         )
 
     raise ValueError(f"Unsupported channel estimator type: {cfg.type!r}")
@@ -1039,7 +1049,7 @@ def build_adapter(
             opt = CSIAwareSingleTaskOptimizer(M=M, tasks=inference_tasks)
         else:
             opt = CSIAwareMultiTaskOptimizer(M=M, tasks=inference_tasks)
-        return DirectCsiAdapter(optimizer=opt, **common)
+        return DirectCsiAdapter(optimizer=opt, probe_every_slot=True, **common)
 
     # ------------------------------------------------------------------
     # No-CSI optimizer (single or multi task)

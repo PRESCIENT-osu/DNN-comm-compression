@@ -157,9 +157,11 @@ class ChannelEstimatorConfig(BaseModel):
     Args:
         type: Estimator algorithm.
         window_size: Number of recent observations to retain.  Used by
-            ``moving_average`` and ``lcb``.  Ignored for all other types.
+            ``moving_average`` and ``windowed_lcb``.  Ignored for all other types.
+            If omitted, the library estimator's default is used.
         z: LCB confidence width: estimate = mean - z * std.  Applies to
-            ``lcb`` only.
+            ``lcb`` and ``windowed_lcb`` only.  If omitted, the library
+            estimator's default is used (~1.28, one-sided 90% quantile).
         history_source: Where to load past probe observations for warm-up.
         experiment_name_contains: Substring filter applied to experiment_id when
             querying the metrics server for probe history.  Injected by the
@@ -168,16 +170,18 @@ class ChannelEstimatorConfig(BaseModel):
             Required when history_source is ``prebuilt``.
         max_age_days: Maximum age of loaded observations in days.
         warmup_value_bps: Fallback capacity used when no history is available.
+            If omitted, the library estimator's default is used (1e12 bps for
+            most types).  Required for ``mean`` which has no library default.
     """
 
     type: ChannelEstimatorType = ChannelEstimatorType.MOVING_AVG
-    window_size: int = 10
-    z: float = 1.5
+    window_size: int | None = None
+    z: float | None = None
     history_source: ChannelEstimatorHistorySource = ChannelEstimatorHistorySource.NONE
     experiment_name_contains: str | None = None
     prebuilt_path: str | None = None
     max_age_days: int = 30
-    warmup_value_bps: float = 1.0e8
+    warmup_value_bps: float | None = None
 
 
 class SteinOracleConfig(BaseModel):
