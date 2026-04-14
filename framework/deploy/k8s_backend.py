@@ -292,16 +292,6 @@ def _node_pod(
         },
         "spec": {
             "hostname": node_cfg.host,
-            "affinity": {
-                "podAntiAffinity": {
-                    "requiredDuringSchedulingIgnoredDuringExecution": [
-                        {
-                            "labelSelector": {"matchLabels": {"experiment": exp.name}},
-                            "topologyKey": "kubernetes.io/hostname",
-                        }
-                    ]
-                }
-            },
             "containers": [container],
             "volumes": [
                 {
@@ -418,18 +408,6 @@ def _orchestrator_job(
                 },
                 "spec": {
                     "restartPolicy": "Never",
-                    "affinity": {
-                        "podAntiAffinity": {
-                            "requiredDuringSchedulingIgnoredDuringExecution": [
-                                {
-                                    "labelSelector": {
-                                        "matchLabels": {"experiment": exp.name}
-                                    },
-                                    "topologyKey": "kubernetes.io/hostname",
-                                }
-                            ]
-                        }
-                    },
                     "containers": [
                         {
                             "name": "orchestrator",
@@ -643,16 +621,6 @@ def _multi_node_pod(
         },
         "spec": {
             "hostname": node_cfg.host,
-            "affinity": {
-                "podAntiAffinity": {
-                    "requiredDuringSchedulingIgnoredDuringExecution": [
-                        {
-                            "labelSelector": {"matchLabels": {"experiment": exp.name}},
-                            "topologyKey": "kubernetes.io/hostname",
-                        }
-                    ]
-                }
-            },
             "containers": [container],
             "volumes": [
                 {
@@ -813,18 +781,6 @@ def _opt_orchestrator_job(
                 },
                 "spec": {
                     "restartPolicy": "Never",
-                    "affinity": {
-                        "podAntiAffinity": {
-                            "requiredDuringSchedulingIgnoredDuringExecution": [
-                                {
-                                    "labelSelector": {
-                                        "matchLabels": {"experiment": exp.name}
-                                    },
-                                    "topologyKey": "kubernetes.io/hostname",
-                                }
-                            ]
-                        }
-                    },
                     "containers": [
                         {
                             "name": "orchestrator",
@@ -923,18 +879,6 @@ def _multi_orchestrator_job(
                 },
                 "spec": {
                     "restartPolicy": "Never",
-                    "affinity": {
-                        "podAntiAffinity": {
-                            "requiredDuringSchedulingIgnoredDuringExecution": [
-                                {
-                                    "labelSelector": {
-                                        "matchLabels": {"experiment": exp.name}
-                                    },
-                                    "topologyKey": "kubernetes.io/hostname",
-                                }
-                            ]
-                        }
-                    },
                     "containers": [
                         {
                             "name": "orchestrator",
