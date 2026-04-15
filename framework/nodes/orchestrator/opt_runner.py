@@ -494,10 +494,13 @@ class OptRunner:
 
         run_id = f"{self._exp.name}_{sub_exp.name}"
 
-        # Warm-up: one untimed batch so CUDA JIT compiles before timed profiling.
-        # Use a distinct run_id so these events are excluded from _query_tau_and_a.
+        # Warm-up: run several untimed batches so CUDA JIT compiles on every node
+        # before timed profiling begins.  A single batch is insufficient — the
+        # first profiling batch still hits kernel-compilation latency on intermediate
+        # nodes (e.g. node B), inflating τ by 100–1000×.  Use a distinct run_id so
+        # these events are excluded from _query_tau_and_a.
         await self._data_client.run_slot(
-            n_batches=1,
+            n_batches=5,
             run_id=f"{run_id}_warmup",
             node_host=self._node_host,
             emitter=self._emitter,

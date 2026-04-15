@@ -547,7 +547,7 @@ async def _process_task(state: MultiNodeState, item: QueueItem) -> float:
     request = item.request
     ps = state.pipelines[request.pipeline_id]
 
-    compute_start = time.time()
+    compute_start: float = 0.0
     compute_seconds: float = 0.0
 
     state.emitter.emit(
@@ -599,6 +599,7 @@ async def _process_task(state: MultiNodeState, item: QueueItem) -> float:
             )
 
         # Forward pass through this pipeline's partitions on this node.
+        compute_start = time.time()
         t0 = time.perf_counter()
         with torch.no_grad():
             for partition in ps.partitions:
