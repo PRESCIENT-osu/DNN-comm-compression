@@ -14,6 +14,7 @@ optimizer decisions.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from typing import Any, Protocol
@@ -28,7 +29,7 @@ from framework.nodes.metrics.emitter import MetricsEmitter
 logger = logging.getLogger(__name__)
 
 _PROBE_TIMEOUT = httpx.Timeout(connect=10.0, write=120.0, read=60.0, pool=5.0)
-_DEFAULT_PAYLOAD_BYTES = 1_048_576  # 1 MiB throughput probe payload
+_DEFAULT_PAYLOAD_BYTES = 20_971_520  # 20 MiB throughput probe payload
 
 
 # ---------------------------------------------------------------------------
@@ -144,60 +145,63 @@ class LinkProber:
             Dict mapping ``link_id`` to the measured throughput in bps.
             Links that failed to probe are absent from the result.
         """
-        results: dict[str, float] = {}
 
-        async with httpx.AsyncClient(timeout=_PROBE_TIMEOUT) as client:
-            for link in self.links:
-                link_id = link.link_id
-                from_url = self._node_base_url(link.from_node)
-                to_base = self._node_base_url(link.to_node)
-
-                try:
-                    resp = await client.post(
-                        f"{from_url}/probe/measure",
-                        json={
-                            "target_base_url": to_base,
-                            "payload_bytes": self.payload_bytes,
-                        },
-                    )
-                    resp.raise_for_status()
-                    data: dict[str, Any] = resp.json()
-                    rtt_ms: float = float(data["rtt_ms"])
-                    throughput_mbps: float = float(data["throughput_mbps"])
-                except Exception as exc:
-                    logger.warning(
-                        "Probe failed for link %s→%s: %s",
-                        link.from_node,
-                        link.to_node,
-                        exc,
-                    )
-                    continue
-
-                c_actual_bps = throughput_mbps * 1e6
-                results[link_id] = c_actual_bps
-
-                self.emitter.emit(
-                    LinkProbeEvent(
-                        experiment_id=experiment_id,
-                        run_id=run_id,
-                        from_node=link.from_node,
-                        to_node=link.to_node,
-                        rtt_ms=rtt_ms,
-                        throughput_mbps=throughput_mbps,
-                        slot_id=slot_id,
-                        sub_experiment_name=sub_experiment_name,
-                    )
+        async def _probe_one(
+            client: httpx.AsyncClient,
+            link: OptLinkConfig,
+        ) -> tuple[str, float | None]:
+            """Probe a single link; returns (link_id, bps) or (link_id, None) on failure."""
+            link_id = link.link_id
+            from_url = self._node_base_url(link.from_node)
+            to_base = self._node_base_url(link.to_node)
+            try:
+                resp = await client.post(
+                    f"{from_url}/probe/measure",
+                    json={
+                        "target_base_url": to_base,
+                        "payload_bytes": self.payload_bytes,
+                    },
                 )
-
-                logger.debug(
-                    "Probe %s→%s: rtt=%.1fms throughput=%.1fMbps",
+                resp.raise_for_status()
+                data: dict[str, Any] = resp.json()
+                rtt_ms: float = float(data["rtt_ms"])
+                throughput_mbps: float = float(data["throughput_mbps"])
+            except Exception as exc:
+                logger.warning(
+                    "Probe failed for link %s→%s: %s",
                     link.from_node,
                     link.to_node,
-                    rtt_ms,
-                    throughput_mbps,
+                    exc,
                 )
+                return link_id, None
 
-        return results
+            self.emitter.emit(
+                LinkProbeEvent(
+                    experiment_id=experiment_id,
+                    run_id=run_id,
+                    from_node=link.from_node,
+                    to_node=link.to_node,
+                    rtt_ms=rtt_ms,
+                    throughput_mbps=throughput_mbps,
+                    slot_id=slot_id,
+                    sub_experiment_name=sub_experiment_name,
+                )
+            )
+            logger.debug(
+                "Probe %s→%s: rtt=%.1fms throughput=%.1fMbps",
+                link.from_node,
+                link.to_node,
+                rtt_ms,
+                throughput_mbps,
+            )
+            return link_id, throughput_mbps * 1e6
+
+        async with httpx.AsyncClient(timeout=_PROBE_TIMEOUT) as client:
+            probe_results = await asyncio.gather(
+                *(_probe_one(client, link) for link in self.links)
+            )
+
+        return {lid: bps for lid, bps in probe_results if bps is not None}
 
 
 # ---------------------------------------------------------------------------

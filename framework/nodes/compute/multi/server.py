@@ -76,11 +76,11 @@ class ProbeMeasureRequest(BaseModel):
 
     Args:
         target_base_url: Base URL of the downstream node (e.g. ``http://node-b:8000``).
-        payload_bytes: Bytes to send in the throughput probe POST (default: 1 MiB).
+        payload_bytes: Bytes to send in the throughput probe POST (default: 20 MiB).
     """
 
     target_base_url: str
-    payload_bytes: int = 1_048_576
+    payload_bytes: int = 20_971_520
 
 
 class PipelineWeightsUpdate(BaseModel):
@@ -669,31 +669,20 @@ async def _process_task(state: MultiNodeState, item: QueueItem) -> float:
 
         assert ps.next_node_url is not None
         assert ps.next_node_name is not None
-        t0 = time.perf_counter()
-        await _forward_to_next(ps.next_node_url, request, compressed)
-        sent_time = time.time()
-        state.emitter.emit(
-            SendEvent(
-                experiment_id=request.experiment_id,
-                run_id=request.run_id,
-                request_id=request.task_id,
-                from_node=state.node_name,
-                to_node=ps.next_node_name,
-                pipeline_id=request.pipeline_id,
+        asyncio.create_task(
+            _forward_and_emit(
+                next_url=ps.next_node_url,
+                next_node_name=ps.next_node_name,
+                request=request,
+                compressed=compressed,
+                state=state,
+                item=item,
+                compute_start=compute_start,
+                compute_end=compute_end,
+                compress_start=compress_start,
+                compress_end=compress_end,
                 payload_bytes=len(compressed),
-                duration_ms=(time.perf_counter() - t0) * 1000,
             )
-        )
-
-        _emit_timing(
-            state,
-            request,
-            item,
-            compute_start,
-            compute_end,
-            compress_start,
-            compress_end,
-            sent_time,
         )
         return compute_seconds
 
@@ -744,6 +733,75 @@ def _emit_timing(
             sent_time=sent_time,
         )
     )
+
+
+async def _forward_and_emit(
+    next_url: str,
+    next_node_name: str,
+    request: MultiInferRequest,
+    compressed: bytes,
+    state: MultiNodeState,
+    item: QueueItem,
+    compute_start: float,
+    compute_end: float,
+    compress_start: float,
+    compress_end: float,
+    payload_bytes: int,
+) -> None:
+    """Forward compressed activation to the next node and emit timing events.
+
+    Runs as a background asyncio task spawned by ``_process_task`` so the
+    worker is not blocked on the TCP transfer.  ``SendEvent`` and
+    ``TaskNodeTimingEvent`` are emitted once the 202 ACK arrives, preserving
+    the same timing semantics as the synchronous path: ``sent_time`` records
+    when the downstream node confirmed receipt, not when the send was initiated.
+
+    Args:
+        next_url: Full /infer URL of the downstream node.
+        next_node_name: Downstream node name for metric tagging.
+        request: Original inference request.
+        compressed: Compressed activation bytes to transmit.
+        state: Shared node state (emitter access).
+        item: Original queue item (carries enqueue timing for TaskNodeTimingEvent).
+        compute_start: Wall-clock time when forward pass began.
+        compute_end: Wall-clock time when forward pass completed.
+        compress_start: Wall-clock time when compression began.
+        compress_end: Wall-clock time when compression completed.
+        payload_bytes: Byte count of the compressed payload.
+    """
+    t0 = time.perf_counter()
+    try:
+        await _forward_to_next(next_url, request, compressed)
+        sent_time = time.time()
+        state.emitter.emit(
+            SendEvent(
+                experiment_id=request.experiment_id,
+                run_id=request.run_id,
+                request_id=request.task_id,
+                from_node=state.node_name,
+                to_node=next_node_name,
+                pipeline_id=request.pipeline_id,
+                payload_bytes=payload_bytes,
+                duration_ms=(time.perf_counter() - t0) * 1000,
+            )
+        )
+        _emit_timing(
+            state,
+            request,
+            item,
+            compute_start,
+            compute_end,
+            compress_start,
+            compress_end,
+            sent_time,
+        )
+    except Exception:
+        logger.exception(
+            "Failed to forward task '%s' (pipeline '%s') to %s",
+            request.task_id,
+            request.pipeline_id,
+            next_url,
+        )
 
 
 async def _forward_to_next(
