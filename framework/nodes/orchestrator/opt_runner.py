@@ -45,6 +45,7 @@ from framework.datamodels.events import (
     ThroughputConstraintEvent,
 )
 from framework.datamodels.experiment import CompressionMethod
+from framework.datamodels.multi_experiment import WorkloadPattern
 from framework.datamodels.opt_experiment import (
     AccuracyModelSubExperiment,
     CsiAwareSubExperiment,  # noqa: F401
@@ -1144,6 +1145,14 @@ class OptRunner:
                     sub_experiment_name=sub_exp_name,
                 )
                 c_t = probe_dict_to_c_t_vector(probe_bps, global_order)
+                # Intra-pipeline window concurrency correction: under FILL,
+                # W tasks per pipeline are in-flight simultaneously and
+                # contend on each link, so per-task effective capacity is
+                # link_bps / W.  Inter-pipeline sharing is handled separately
+                # by the optimizer via s_comm, so we do NOT divide by the
+                # pipeline count.
+                if self._exp.workload.pattern == WorkloadPattern.FILL:
+                    c_t = c_t / float(self._exp.workload.window_per_pipeline)
                 last_c_t = c_t
                 # Update the adapter's channel estimator with the real measurement.
                 # No-op for DirectCsiAdapter (no internal estimator).
