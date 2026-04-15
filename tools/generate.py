@@ -821,7 +821,7 @@ def _validate_opt_allowed_methods(links: list[dict[str, Any]]) -> None:
             the offending links.
     """
     lists_by_link: dict[str, list[str]] = {
-        lk["link_id"]: lk["allowed_methods"]
+        lk.get("link_id") or f"{lk['from']}-{lk['to']}": lk["allowed_methods"]
         for lk in links
         if lk.get("allowed_methods")
     }
