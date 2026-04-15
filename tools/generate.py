@@ -805,6 +805,43 @@ def _inject_channel_estimator_context(
     return result
 
 
+def _validate_opt_allowed_methods(links: list[dict[str, Any]]) -> None:
+    """Assert that all links with allowed_methods have identical lists.
+
+    If any link defines ``allowed_methods``, every link must define the same
+    list (same length, same content, same order).  This invariant is required
+    by the scheme-sweep loop in ``opt_runner``, which reads the scheme list
+    from ``exp.links[0].allowed_methods``.
+
+    Args:
+        links: Raw link config dicts from the opt spec.
+
+    Raises:
+        ValueError: If links have differing ``allowed_methods`` lists, naming
+            the offending links.
+    """
+    lists_by_link: dict[str, list[str]] = {
+        lk["link_id"]: lk["allowed_methods"]
+        for lk in links
+        if lk.get("allowed_methods")
+    }
+    if len(lists_by_link) == 0:
+        return
+    reference_link, reference_methods = next(iter(lists_by_link.items()))
+    offending = [
+        link_id
+        for link_id, methods in lists_by_link.items()
+        if methods != reference_methods
+    ]
+    if offending:
+        raise ValueError(
+            f"All links must have identical allowed_methods lists for scheme sweeps.\n"
+            f"  Reference link '{reference_link}': {reference_methods}\n"
+            f"  Offending link(s): {offending}\n"
+            f"  Fix: ensure all links share the same allowed_methods list."
+        )
+
+
 def _materialise_opt(
     spec_dir: Path,
     profile_file: Path,
@@ -855,6 +892,9 @@ def _materialise_opt(
 
     # Inject profile context into channel estimator configs.
     selected = _inject_channel_estimator_context(selected, profile_name)
+
+    # Validate that all links with allowed_methods have identical lists.
+    _validate_opt_allowed_methods(spec.get("links", []))
 
     # Build node configs by merging spec node names with profile host/port.
     profile_node_map = {n["name"]: n for n in profile.get("nodes", [])}

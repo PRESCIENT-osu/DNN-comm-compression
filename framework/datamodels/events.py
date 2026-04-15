@@ -227,6 +227,7 @@ class SubExperimentEvent(BaseEvent):
     sub_experiment_name: str | None
     duration_s: float
     n_runs: int
+    compression_scheme: str = ""
 
 
 class TaskAccuracyEvent(BaseEvent):
@@ -250,6 +251,7 @@ class TaskAccuracyEvent(BaseEvent):
     )
     slot_id: int | None = None  # set during optimization loop; None for sweep runs
     sub_experiment_name: str | None = None
+    compression_scheme: str = ""
 
 
 class OptSlotEvent(BaseEvent):
@@ -284,6 +286,7 @@ class OptSlotEvent(BaseEvent):
         False  # True when optimizer returned None (infeasible); η fell back to eta_max
     )
     sub_experiment_name: str | None = None
+    compression_scheme: str = ""
 
 
 class ThroughputConstraintEvent(BaseEvent):

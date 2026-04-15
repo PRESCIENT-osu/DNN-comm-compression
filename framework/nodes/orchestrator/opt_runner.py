@@ -324,8 +324,8 @@ class OptRunner:
         self._mapper = CompressionMapper(exp.links)
         self._pipeline_ids = [p.name for p in exp.pipelines]
 
-        # In-memory cache of loaded accuracy models (keyed by sub_exp.name).
-        self._accuracy_models: dict[str, dict[str, AccuracyModel]] = {}
+        # In-memory cache of loaded accuracy models (keyed by (sub_exp.name, scheme)).
+        self._accuracy_models: dict[tuple[str, str], dict[str, AccuracyModel]] = {}
 
         # Profiling artifact cache: nominal bps per link at η=1.0.
         self._nominal_bps_per_link: dict[str, float] = {}
@@ -341,45 +341,78 @@ class OptRunner:
     # ------------------------------------------------------------------
 
     async def run(self) -> None:
-        """Execute all sub-experiments in definition order.
+        """Execute all sub-experiments for each compression scheme in definition order.
 
-        Sub-experiments are run sequentially.  An exception in any phase
-        propagates immediately and halts the run.
+        The scheme list is taken from ``exp.links[0].allowed_methods`` (or
+        ``["topk"]`` when unset).  For each scheme the mapper is locked to that
+        scheme via ``set_active_scheme`` and all sub-experiments are run in
+        order.  ``ProfilingSubExperiment`` is skipped on subsequent scheme
+        iterations because profiling is scheme-independent.
+
+        Sub-experiments are run sequentially within each scheme.  An exception
+        in any phase propagates immediately and halts the run.
         """
-        for sub_exp in self._exp.sub_experiments:
+        schemes = (
+            self._exp.links[0].allowed_methods
+            if self._exp.links and self._exp.links[0].allowed_methods
+            else ["topk"]
+        )
+
+        for scheme_idx, scheme in enumerate(schemes):
+            self._mapper.set_active_scheme(scheme)
             logger.info(
-                "=== Sub-experiment: %s (type=%s) ===", sub_exp.name, sub_exp.type
+                "=== Scheme: %s (%d/%d) ===", scheme, scheme_idx + 1, len(schemes)
             )
-            t_sub_start = time.perf_counter()
-            await self._run_sub_experiment(sub_exp)
-            duration_s = time.perf_counter() - t_sub_start
-            logger.info(
-                "[%s] Sub-experiment complete in %.1fs", sub_exp.name, duration_s
-            )
-            if isinstance(sub_exp, ProfilingSubExperiment):
-                n_runs = 1
-            elif isinstance(sub_exp, AccuracyModelSubExperiment):
-                n_runs = sub_exp.n_sweep_samples
-            elif isinstance(sub_exp, NoCsiSubExperiment):
-                n_runs = self._exp.optimization_loop.n_slots * len(sub_exp.mu_sweep)
-            else:
-                n_runs = self._exp.optimization_loop.n_slots
-            self._emitter.emit(
-                SubExperimentEvent(
-                    experiment_id=self._exp.name,
-                    run_id=sub_exp.name,
-                    sub_experiment_name=sub_exp.name,
-                    duration_s=duration_s,
-                    n_runs=n_runs,
+
+            for sub_exp in self._exp.sub_experiments:
+                if scheme_idx > 0 and isinstance(sub_exp, ProfilingSubExperiment):
+                    logger.info(
+                        "[%s] Skipping profiling for scheme '%s' (already done)",
+                        sub_exp.name,
+                        scheme,
+                    )
+                    continue
+
+                scoped_name = f"{sub_exp.name}__{scheme}"
+                logger.info(
+                    "=== Sub-experiment: %s (type=%s) scheme=%s ===",
+                    scoped_name,
+                    sub_exp.type,
+                    scheme,
                 )
-            )
+                t_sub_start = time.perf_counter()
+                await self._run_sub_experiment(sub_exp, scheme=scheme)
+                duration_s = time.perf_counter() - t_sub_start
+                logger.info(
+                    "[%s] Sub-experiment complete in %.1fs", scoped_name, duration_s
+                )
+                if isinstance(sub_exp, ProfilingSubExperiment):
+                    n_runs = 1
+                elif isinstance(sub_exp, AccuracyModelSubExperiment):
+                    n_runs = sub_exp.n_sweep_samples
+                elif isinstance(sub_exp, NoCsiSubExperiment):
+                    n_runs = self._exp.optimization_loop.n_slots * len(sub_exp.mu_sweep)
+                else:
+                    n_runs = self._exp.optimization_loop.n_slots
+                self._emitter.emit(
+                    SubExperimentEvent(
+                        experiment_id=self._exp.name,
+                        run_id=scoped_name,
+                        sub_experiment_name=scoped_name,
+                        duration_s=duration_s,
+                        n_runs=n_runs,
+                        compression_scheme=scheme,
+                    )
+                )
         logger.info("Optimization experiment '%s' complete", self._exp.name)
 
-    async def _run_sub_experiment(self, sub_exp: OptSubExperiment) -> None:
+    async def _run_sub_experiment(
+        self, sub_exp: OptSubExperiment, scheme: str = "topk"
+    ) -> None:
         if isinstance(sub_exp, ProfilingSubExperiment):
             await self._run_profiling(sub_exp)
         elif isinstance(sub_exp, AccuracyModelSubExperiment):
-            await self._run_accuracy_model(sub_exp)
+            await self._run_accuracy_model(sub_exp, scheme=scheme)
         elif isinstance(sub_exp, NoCsiSubExperiment):
             # Build simulations once outside the mu loop to avoid reloading
             # the Llama model for every mu value.
@@ -399,7 +432,7 @@ class OptRunner:
             try:
                 for mu in sub_exp.mu_sweep:
                     await self._run_opt_with_adapter(
-                        sub_exp, mu=mu, pre_built_simulations=pre_sims
+                        sub_exp, mu=mu, pre_built_simulations=pre_sims, scheme=scheme
                     )
             finally:
                 if pre_sims:
@@ -415,6 +448,7 @@ class OptRunner:
             await self._run_opt_with_adapter(
                 sub_exp,
                 skip_stein=isinstance(sub_exp, CsiAwareSubExperiment),
+                scheme=scheme,
             )
 
     # ------------------------------------------------------------------
@@ -635,7 +669,9 @@ class OptRunner:
     # Phase: accuracy model
     # ------------------------------------------------------------------
 
-    async def _run_accuracy_model(self, sub_exp: AccuracyModelSubExperiment) -> None:
+    async def _run_accuracy_model(
+        self, sub_exp: AccuracyModelSubExperiment, scheme: str = "topk"
+    ) -> None:
         """Train a surrogate accuracy model A_k(η) for one pipeline via simulation sweep.
 
         1. Build a content-addressed artifact path that encodes model, partition
@@ -652,6 +688,7 @@ class OptRunner:
 
         Args:
             sub_exp: Accuracy model sub-experiment config.
+            scheme: Active compression scheme for this sweep pass.
         """
         pipeline = self._exp.pipeline_for(sub_exp.pipeline_id)
         pipeline_links = self._pipeline_links(pipeline.flow)
@@ -685,10 +722,12 @@ class OptRunner:
                 sub_exp.name,
                 pkl_path.name,
             )
-            self._load_accuracy_model_from_artifact(sub_exp, pkl_path)
+            self._load_accuracy_model_from_artifact(sub_exp, pkl_path, scheme=scheme)
             return
 
-        X, y = await self._run_accuracy_sweep_simulated(sub_exp, pipeline_links)
+        X, y = await self._run_accuracy_sweep_simulated(
+            sub_exp, pipeline_links, scheme=scheme
+        )
 
         if not X:
             logger.warning(
@@ -723,12 +762,15 @@ class OptRunner:
             len(y),
             pkl_path.name,
         )
-        self._accuracy_models.setdefault(sub_exp.name, {})[sub_exp.pipeline_id] = model
+        self._accuracy_models.setdefault((sub_exp.name, scheme), {})[
+            sub_exp.pipeline_id
+        ] = model
 
     async def _run_accuracy_sweep_simulated(
         self,
         sub_exp: AccuracyModelSubExperiment,
         pipeline_links: list[Any],
+        scheme: str = "topk",
     ) -> tuple[list[list[float]], list[float]]:
         """Generate (η_vector, accuracy) training pairs via simulation.
 
@@ -740,6 +782,7 @@ class OptRunner:
             sub_exp: Accuracy model sub-experiment config.
             pipeline_links: List of ``OptLinkConfig`` for this pipeline's links,
                 in flow order.
+            scheme: Active compression scheme for this sweep pass.
 
         Returns:
             Tuple of (X, y) where X is a list of η-vectors and y is a list of
@@ -812,7 +855,8 @@ class OptRunner:
                 if fast_eval is not None and hasattr(fast_eval, "n_sequences")
                 else sub_exp.dataset.batch_size
             )
-            run_id = f"{self._exp.name}_{sub_exp.name}_sweep_{i}"
+            scoped_name = f"{sub_exp.name}__{scheme}"
+            run_id = f"{self._exp.name}_{scoped_name}_sweep_{i}"
             self._emitter.emit(
                 TaskAccuracyEvent(
                     experiment_id=self._exp.name,
@@ -824,7 +868,8 @@ class OptRunner:
                     accuracy=acc,
                     n_samples=n_samples,
                     eta_per_link=eta_per_link,
-                    sub_experiment_name=sub_exp.name,
+                    sub_experiment_name=scoped_name,
+                    compression_scheme=scheme,
                 )
             )
             await asyncio.sleep(0)
@@ -862,7 +907,7 @@ class OptRunner:
         return result
 
     def _load_accuracy_model_from_artifact(
-        self, sub_exp: AccuracyModelSubExperiment, pkl_path: Path
+        self, sub_exp: AccuracyModelSubExperiment, pkl_path: Path, scheme: str = "topk"
     ) -> None:
         """Restore an accuracy model from its pickle artifact into the in-memory cache.
 
@@ -870,6 +915,7 @@ class OptRunner:
             sub_exp: Accuracy model sub-experiment config.
             pkl_path: Explicit path to the ``.pkl`` artifact (content-addressed;
                 computed by the caller so we don't recompute the path here).
+            scheme: Active compression scheme; used as part of the cache key.
         """
         from framework.optimizer.accuracy_model import (
             load_accuracy_model,  # noqa: PLC0415
@@ -885,10 +931,12 @@ class OptRunner:
                 exc,
             )
             return
-        self._accuracy_models.setdefault(sub_exp.name, {})[sub_exp.pipeline_id] = model
+        self._accuracy_models.setdefault((sub_exp.name, scheme), {})[
+            sub_exp.pipeline_id
+        ] = model
 
     def _resolve_accuracy_models(
-        self, accuracy_model_refs: list[str] | None
+        self, accuracy_model_refs: list[str] | None, scheme: str = "topk"
     ) -> dict[str, AccuracyModel]:
         """Merge accuracy models from multiple AccuracyModelSubExperiment references.
 
@@ -899,6 +947,8 @@ class OptRunner:
         Args:
             accuracy_model_refs: Names of AccuracyModelSubExperiments to merge.
                 ``None`` or empty list → all pipelines get the constant fallback.
+            scheme: Active compression scheme; used to look up the correct
+                per-scheme entry in ``_accuracy_models``.
 
         Returns:
             Dict of ``pipeline_id → AccuracyModel``.
@@ -909,7 +959,7 @@ class OptRunner:
 
         merged: dict[str, AccuracyModel] = {}
         for ref in accuracy_model_refs or []:
-            merged.update(self._accuracy_models.get(ref, {}))
+            merged.update(self._accuracy_models.get((ref, scheme), {}))
 
         return {
             pid: merged.get(pid, ConstantAccuracyModel()) for pid in self._pipeline_ids
@@ -925,6 +975,7 @@ class OptRunner:
         mu: float | None = None,
         pre_built_simulations: dict[str, Any] | None = None,
         skip_stein: bool = False,
+        scheme: str = "topk",
     ) -> None:
         """Run a slot loop using the external optimizer adapter interface.
 
@@ -941,6 +992,7 @@ class OptRunner:
             skip_stein: When True, skip simulation building even if
                 stein_config is set (used for CSI-aware, which resolves η*
                 analytically and never invokes accuracy callables).
+            scheme: Active compression scheme for this sweep pass.
         """
         global_order = build_global_order(self._exp)
 
@@ -971,7 +1023,9 @@ class OptRunner:
 
         # Resolve surrogate accuracy models for sub-experiments that reference them.
         accuracy_model_refs = getattr(sub_exp, "accuracy_model_refs", None)
-        accuracy_models = self._resolve_accuracy_models(accuracy_model_refs)
+        accuracy_models = self._resolve_accuracy_models(
+            accuracy_model_refs, scheme=scheme
+        )
 
         inference_tasks, task_id_to_pipeline, pipeline_to_task_id = (
             build_inference_tasks(
@@ -995,11 +1049,11 @@ class OptRunner:
             mu=mu,
         )
 
-        # Build a descriptive run name.
+        # Build a descriptive run name (scoped by scheme).
         if mu is not None:
-            run_name = f"{sub_exp.name}_mu{mu}"
+            run_name = f"{sub_exp.name}__{scheme}_mu{mu}"
         else:
-            run_name = sub_exp.name
+            run_name = f"{sub_exp.name}__{scheme}"
 
         run_id = f"{self._exp.name}_{run_name}_{uuid.uuid4().hex[:6]}"
         logger.info("[%s] Starting optimization run via adapter", run_name)
@@ -1013,6 +1067,7 @@ class OptRunner:
                 task_id_to_pipeline=task_id_to_pipeline,
                 pipeline_to_task_id=pipeline_to_task_id,
                 inference_tasks=inference_tasks,
+                scheme=scheme,
             )
         finally:
             if owns_simulations and simulations:
@@ -1035,6 +1090,7 @@ class OptRunner:
         task_id_to_pipeline: dict[int, str],
         pipeline_to_task_id: dict[str, int],
         inference_tasks: Any,
+        scheme: str = "topk",
     ) -> None:
         """Execute the optimization slot loop using a BaseOptimizerAdapter.
 
@@ -1059,6 +1115,7 @@ class OptRunner:
             task_id_to_pipeline: task_id -> pipeline_id mapping.
             pipeline_to_task_id: pipeline_id -> task_id mapping.
             inference_tasks: List of InferenceTask objects (for task_id indexing).
+            scheme: Active compression scheme; recorded on emitted events.
         """
         loop_cfg = self._exp.optimization_loop
         tasks_cfg = self._exp.tasks
@@ -1196,6 +1253,7 @@ class OptRunner:
                         eta_per_link=eta_per_pipeline_per_link.get(pid),
                         slot_id=slot_id,
                         sub_experiment_name=sub_exp_name,
+                        compression_scheme=scheme,
                     )
                 )
 
@@ -1213,6 +1271,7 @@ class OptRunner:
                     solve_time_ms=solve_time_ms,
                     sub_experiment_name=sub_exp_name,
                     infeasible=infeasible,
+                    compression_scheme=scheme,
                 )
             )
 

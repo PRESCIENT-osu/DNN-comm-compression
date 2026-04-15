@@ -46,11 +46,15 @@ _QUAN_BITS: dict[float, int] = {0.5: 16, 0.25: 8, 0.125: 4, 0.0625: 2}
 
 
 def topk_sparsify_per_sample(x: torch.Tensor, eta: float) -> torch.Tensor:
-    """Simulate TopK compression: zero out non-top-k elements per sample.
+    """Simulate TopK compression: zero out non-top-k elements.
 
-    Reshapes ``[B, ...]`` → ``[B, D]``, keeps the top-``k`` elements per row
-    by absolute magnitude, zeroes the rest, then reshapes back.  Matches the
-    round-trip of ``TopK.compress`` / ``TopK.decompress`` exactly.
+    Dispatch is shape-based to match ``TopK.compress`` / ``TopK.decompress``:
+
+    - 3-D tensors ``[B, L, D]``: top-k applied **per token** — each of the
+      ``B×L`` token vectors independently retains its ``k`` largest-magnitude
+      hidden dimensions.
+    - All other shapes: top-k applied **per sample** — each sample's
+      activations are flattened and ranked globally.
 
     Args:
         x: Input activation tensor of any shape with batch on dim 0.
@@ -64,14 +68,21 @@ def topk_sparsify_per_sample(x: torch.Tensor, eta: float) -> torch.Tensor:
     if eta <= 0.0:
         return torch.zeros_like(x)
 
+    if x.ndim == 3:
+        # Per-token path for transformer hidden states [B, L, D]
+        B, L, D = x.shape
+        flat = x.reshape(B * L, D)
+        k = max(1, int(eta * D))
+        thresh_rank = D - k + 1
+        threshold = torch.kthvalue(flat.abs(), thresh_rank, dim=1, keepdim=True).values
+        mask = flat.abs() >= threshold
+        return (flat * mask).reshape(x.shape)
+
+    # Per-sample path for CNN activations [B, C, H, W] etc.
     shape = x.shape
     flat = x.reshape(x.shape[0], -1)  # [B, D]
     D = flat.shape[1]
     k = max(1, int(eta * D))
-
-    # kthvalue finds the k-th smallest; we want the k-th largest of abs values.
-    # kthvalue along dim=1 on abs values, rank from smallest → (D-k+1)-th smallest
-    # is the k-th largest.
     thresh_rank = D - k + 1
     threshold = torch.kthvalue(flat.abs(), thresh_rank, dim=1, keepdim=True).values
     mask = flat.abs() >= threshold  # [B, D] bool, stays on device

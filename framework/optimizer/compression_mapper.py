@@ -66,6 +66,20 @@ class CompressionMapper:
 
     def __init__(self, links: list[OptLinkConfig]) -> None:
         self._links: dict[str, OptLinkConfig] = {lk.link_id: lk for lk in links}
+        self._active_scheme: str | None = None
+
+    def set_active_scheme(self, scheme: str) -> None:
+        """Set the active compression scheme for all subsequent ``map()`` calls.
+
+        When set, ``map()`` dispatches directly to the named scheme rather than
+        using the priority-chain over ``allowed_methods``.  Call this at the
+        start of each scheme iteration in the scheme sweep loop.
+
+        Args:
+            scheme: Compression scheme name (e.g. ``"topk"``, ``"quantization"``,
+                ``"llmint8"``).
+        """
+        self._active_scheme = scheme
 
     def map(
         self,
@@ -75,10 +89,8 @@ class CompressionMapper:
     ) -> CompressionDecision:
         """Map η to a concrete compression decision for a specific link/pipeline.
 
-        The method is selected by iterating ``allowed_methods`` in order and
-        returning the first match.  If ``llmint8`` is allowed and an
-        ``llmint8_mapping`` entry exists for ``pipeline_id``, the closest table
-        entry is used.  Otherwise ``topk`` is used.
+        When ``_active_scheme`` is set (via ``set_active_scheme``), dispatches
+        directly to that scheme.  Otherwise falls back to ``topk``.
 
         Args:
             link_id: Link identifier (``"{from_node}-{to_node}"``).
@@ -92,19 +104,23 @@ class CompressionMapper:
             KeyError: If ``link_id`` is not found in the mapper's link list.
         """
         link = self._links[link_id]
-        allowed = link.allowed_methods or ["topk"]
 
-        # Try llmint8 first if allowed and mapping is available.
-        if "llmint8" in allowed and link.llmint8_mapping:
-            pipeline_mapping = link.llmint8_mapping.get(pipeline_id)
-            if pipeline_mapping is not None:
-                return self._map_llmint8(pipeline_mapping, eta)
+        if self._active_scheme == "llmint8":
+            if link.llmint8_mapping:
+                pipeline_mapping = link.llmint8_mapping.get(pipeline_id)
+                if pipeline_mapping is not None:
+                    return self._map_llmint8(pipeline_mapping, eta)
+            # Fall through to topk if no llmint8 mapping for this pipeline.
+            return CompressionDecision(
+                method="topk",
+                params={"k": eta},
+                effective_eta=eta,
+            )
 
-        # Try quantization if allowed.
-        if "quantization" in allowed:
+        if self._active_scheme == "quantization":
             return self._map_quantization(eta)
 
-        # Default to topk.
+        # Default (topk or None active scheme).
         return CompressionDecision(
             method="topk",
             params={"k": eta},

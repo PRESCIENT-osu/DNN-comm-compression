@@ -46,13 +46,21 @@ links:
     to: B
     eta_min: 0.01
     eta_max: 1.0
-    allowed_methods: [topk]
+    allowed_methods: [topk, quantization, llmint8]
+    llmint8_mapping:
+      resnet-a:
+        outlier_precision: fp16
+        regular_precision: int8
 
   - from: B
     to: C
     eta_min: 0.01
     eta_max: 1.0
-    allowed_methods: [topk]
+    allowed_methods: [topk, quantization, llmint8]
+    llmint8_mapping:
+      resnet-a:
+        outlier_precision: fp16
+        regular_precision: int8
 
 optimization_loop:
   n_slots: 50

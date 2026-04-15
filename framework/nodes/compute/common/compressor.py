@@ -74,19 +74,41 @@ class NoCompression(Compressor):
 class TopK(Compressor):
     """Sparse compressor retaining the top-k% activations by magnitude.
 
-    Operates per-sample within the batch: each sample's activations are
-    independently ranked by absolute value.  The selected positions are
-    encoded as a bit-packed mask (numpy.packbits, 8 positions per byte)
-    and the corresponding values are stored in position order.
+    Dispatch is shape-based:
+    - 3-D tensors ``[B, L, D]`` (e.g. transformer hidden states): top-k is
+      applied **per token** — each of the ``B×L`` token vectors independently
+      retains its ``k`` largest-magnitude hidden dimensions.
+    - All other shapes (e.g. ``[B, C, H, W]`` for CNNs): top-k is applied
+      **per sample** — each sample's activations are flattened and ranked
+      globally.
+
+    In both cases the selected positions are encoded as a bit-packed mask
+    (numpy.packbits, 8 positions per byte) and the corresponding values are
+    stored in position order.
 
     Compression ratio ≈ rate + 1/8  (values + mask).
-    e.g. rate=0.1 → ~22.5% of original size (vs ~40% for flat-index TopK).
+    e.g. rate=0.1 → ~22.5% of original size.
 
-    rate controls the fraction of elements to retain per sample,
+    rate controls the fraction of elements to retain,
     e.g. 0.1 keeps the 10% largest-magnitude activations.
     """
 
     def compress(self, tensor: torch.Tensor, rate: float) -> bytes:
+        if tensor.ndim == 3:
+            return self._compress_per_token(tensor, rate)
+        return self._compress_per_sample(tensor, rate)
+
+    def decompress(self, data: bytes, device: str) -> torch.Tensor:
+        payload = pickle.loads(data)
+        if len(payload["shape"]) == 3:
+            return self._decompress_per_token(payload, device)
+        return self._decompress_per_sample(payload, device)
+
+    # ------------------------------------------------------------------
+    # Per-sample (CNN) path — original implementation
+    # ------------------------------------------------------------------
+
+    def _compress_per_sample(self, tensor: torch.Tensor, rate: float) -> bytes:
         original_shape = tensor.shape
         batch_size = original_shape[0]
         reshaped = tensor.reshape(batch_size, -1)
@@ -113,8 +135,7 @@ class TopK(Compressor):
         }
         return pickle.dumps(payload)
 
-    def decompress(self, data: bytes, device: str) -> torch.Tensor:
-        payload = pickle.loads(data)
+    def _decompress_per_sample(self, payload: dict, device: str) -> torch.Tensor:
         values = torch.from_numpy(payload["values"]).to(device)
         shape = payload["shape"]
         elements_per_sample = payload["elements_per_sample"]
@@ -126,6 +147,48 @@ class TopK(Compressor):
         reshaped = torch.zeros(
             batch_size, elements_per_sample, device=device, dtype=values.dtype
         )
+        reshaped[mask] = values.flatten()
+        return reshaped.reshape(shape).to(payload.get("dtype", torch.float32))
+
+    # ------------------------------------------------------------------
+    # Per-token (transformer) path — for [B, L, D] hidden states
+    # ------------------------------------------------------------------
+
+    def _compress_per_token(self, tensor: torch.Tensor, rate: float) -> bytes:
+        original_shape = tensor.shape  # [B, L, D]
+        B, L, D = original_shape
+        reshaped = tensor.reshape(B * L, D)  # [B*L, D]
+        k = max(1, int(D * rate))
+
+        _, top_indices = torch.topk(reshaped.abs(), k, dim=1)
+
+        mask = torch.zeros_like(reshaped, dtype=torch.bool)
+        mask.scatter_(1, top_indices, True)
+
+        sorted_indices = torch.sort(top_indices, dim=1)[0]
+        sorted_values = torch.gather(reshaped, 1, sorted_indices)
+
+        mask_np = mask.cpu().numpy().astype(np.uint8)
+        packed_mask = np.packbits(mask_np, axis=1)
+
+        payload = {
+            "values": sorted_values.cpu().float().numpy(),
+            "packed_mask": packed_mask,
+            "shape": original_shape,
+            "elements_per_sample": D,
+            "dtype": tensor.dtype,
+        }
+        return pickle.dumps(payload)
+
+    def _decompress_per_token(self, payload: dict, device: str) -> torch.Tensor:
+        values = torch.from_numpy(payload["values"]).to(device)
+        shape = payload["shape"]  # [B, L, D]
+        B, L, D = shape
+
+        mask_np = np.unpackbits(payload["packed_mask"], axis=1)[:, :D]
+        mask = torch.from_numpy(mask_np).bool().to(device)
+
+        reshaped = torch.zeros(B * L, D, device=device, dtype=values.dtype)
         reshaped[mask] = values.flatten()
         return reshaped.reshape(shape).to(payload.get("dtype", torch.float32))
 

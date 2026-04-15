@@ -1086,7 +1086,7 @@ def build_adapter(
 
     if isinstance(sub_exp, UniformCompressionSingleSubExperiment):
         opt = UniformCompressionSingleTaskBaseline(M=M, tasks=inference_tasks)
-        return DirectCsiAdapter(optimizer=opt, **common)
+        return DirectCsiAdapter(optimizer=opt, probe_every_slot=True, **common)
 
     if isinstance(sub_exp, EstimatedCsiSingleSubExperiment):
         num_links = M - 1
@@ -1107,17 +1107,17 @@ def build_adapter(
 
     if isinstance(sub_exp, StaticEqualShareSubExperiment):
         opt = StaticEqualShareMultiTaskBaseline(M=M, tasks=inference_tasks)
-        return DirectCsiAdapter(optimizer=opt, **common)
+        return DirectCsiAdapter(optimizer=opt, probe_every_slot=True, **common)
 
     if isinstance(sub_exp, ProportionalResourceSubExperiment):
         opt = ProportionalResourceAllocationMultiTaskBaseline(
             M=M, tasks=inference_tasks
         )
-        return DirectCsiAdapter(optimizer=opt, **common)
+        return DirectCsiAdapter(optimizer=opt, probe_every_slot=True, **common)
 
     if isinstance(sub_exp, StrictPriorityGreedySubExperiment):
         opt = StrictPriorityGreedyMultiTaskBaseline(M=M, tasks=inference_tasks)
-        return DirectCsiAdapter(optimizer=opt, **common)
+        return DirectCsiAdapter(optimizer=opt, probe_every_slot=True, **common)
 
     if isinstance(sub_exp, DecoupledDescentSubExperiment):
         num_links = M - 1
