@@ -9,9 +9,9 @@ pipelines:
   - name: resnet-a
     model: resnet
     partitions:
-      A: [p1]
-      B: [p2, p3]
-      C: [p4, p5]
+      A: [p1, p2]
+      B: [p3, p4]
+      C: [p5]
     flow: [A, B, C]
     simulation_path: models/resnet/resnet56-4bfd9763.th
 
@@ -56,7 +56,7 @@ links:
 
 optimization_loop:
   n_slots: 50
-  batches_per_slot: 20
+  batches_per_slot: 10
   profiling_batches: 4
   link_probe_interval_slots: 5
   epsilon: 0.1
@@ -80,7 +80,7 @@ sub_experiments:
       name: cifar10
       path: .datasets/cifar10
       batch_size: 25
-      max_samples: 1000
+      max_samples: 100
       seed: 100
 
   - name: accuracy_model_resnet_poly2
@@ -93,7 +93,7 @@ sub_experiments:
       name: cifar10
       path: .datasets/cifar10
       batch_size: 25
-      max_samples: 1000
+      max_samples: 100
       seed: 100
 
   - name: accuracy_model_resnet_poly3
@@ -119,7 +119,7 @@ sub_experiments:
       name: cifar10
       path: .datasets/cifar10
       batch_size: 25
-      max_samples: 1000
+      max_samples: 100
       seed: 100
 
   - name: accuracy_model_resnet_mlp
@@ -132,7 +132,7 @@ sub_experiments:
       name: cifar10
       path: .datasets/cifar10
       batch_size: 25
-      max_samples: 1000
+      max_samples: 100
       seed: 100
 
   - name: max_compression_single

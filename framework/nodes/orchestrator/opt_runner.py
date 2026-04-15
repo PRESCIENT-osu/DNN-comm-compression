@@ -827,6 +827,7 @@ class OptRunner:
                     sub_experiment_name=sub_exp.name,
                 )
             )
+            await asyncio.sleep(0)
             logger.debug(
                 "[%s] Sample %d/%d: η=%s → accuracy=%.4f",
                 sub_exp.name,
