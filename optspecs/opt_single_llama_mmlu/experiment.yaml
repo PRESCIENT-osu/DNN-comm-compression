@@ -100,7 +100,7 @@ sub_experiments:
     pipeline_id: llama-mmlu-a
     model_type: poly3
     sweep_design: random
-    n_sweep_samples: 100
+    n_sweep_samples: 1000
     dataset:
       name: mmlu
       path: .datasets/mmlu

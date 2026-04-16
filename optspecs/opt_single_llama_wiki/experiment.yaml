@@ -22,7 +22,7 @@ datasets:
     tokenizer_path: models/llama/.partitions/tokenizer
     batch_size: 4
     max_seq_len: 512
-    max_samples: 20
+    max_samples: 100
     seed: 42
 
 stein_datasets:
@@ -51,17 +51,25 @@ links:
     to: B
     eta_min: 0.01
     eta_max: 1.0
-    allowed_methods: [topk]
+    allowed_methods: [topk, quantization, llmint8]
+    llmint8_mapping:
+      resnet-a:
+        outlier_precision: fp16
+        regular_precision: int8
 
   - from: B
     to: C
     eta_min: 0.01
     eta_max: 1.0
-    allowed_methods: [topk]
+    allowed_methods: [topk, quantization, llmint8]
+    llmint8_mapping:
+      resnet-a:
+        outlier_precision: fp16
+        regular_precision: int8
 
 optimization_loop:
   n_slots: 50
-  batches_per_slot: 4
+  batches_per_slot: 20
   profiling_batches: 4
   link_probe_interval_slots: 1
   epsilon: 0.01
@@ -80,7 +88,7 @@ sub_experiments:
     pipeline_id: llama-wiki-a
     model_type: gbm
     sweep_design: random
-    n_sweep_samples: 100
+    n_sweep_samples: 1000
     dataset:
       name: wikitext2
       path: .datasets/wikitext2
