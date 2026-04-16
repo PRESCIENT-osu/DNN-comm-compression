@@ -67,7 +67,7 @@ links:
     llmint8_mapping:
       resnet-a:
         outlier_precision: fp16
-        regular_precision: int8
+        regular_precision: int2
 
   - from: B
     to: C
@@ -77,7 +77,7 @@ links:
     llmint8_mapping:
       resnet-a:
         outlier_precision: fp16
-        regular_precision: int8
+        regular_precision: int2
 
 optimization_loop:
   n_slots: 50

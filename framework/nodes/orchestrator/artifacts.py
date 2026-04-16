@@ -183,7 +183,12 @@ class ArtifactStore:
         blob = json.dumps(content, sort_keys=True, default=str).encode()
         content_hash8 = hashlib.sha256(blob).hexdigest()[:8]
 
-        name = f"{model_slug}__{partition_layout}__{surrogate_type}__{compression_scheme}__{content_hash8}"
+        dataset_slug = (
+            dataset_name.lower().replace("-", "").replace("_", "")
+            if dataset_name
+            else "unknown"
+        )
+        name = f"{model_slug}__{partition_layout}__{surrogate_type}__{compression_scheme}__{dataset_slug}__{content_hash8}"
         return self.shared_root / "accuracy_models" / name
 
     def estimator_state_path(self, from_node: str, to_node: str) -> Path:

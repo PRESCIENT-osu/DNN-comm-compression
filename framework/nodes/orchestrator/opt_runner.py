@@ -748,7 +748,6 @@ class OptRunner:
         self._artifacts.write_json(
             meta_path,
             {
-                "pipeline_id": sub_exp.pipeline_id,
                 "model": pipeline.model,
                 "partitions": pipeline.partitions,
                 "flow": pipeline.flow,
@@ -756,6 +755,7 @@ class OptRunner:
                 "compression_method_per_link": compression_method_per_link,
                 "sweep_design": sub_exp.sweep_design,
                 "n_sweep_samples": sub_exp.n_sweep_samples,
+                "dataset_name": dataset_cfg.name,
                 "dataset_seed": dataset_cfg.seed,
                 "dataset_max_samples": dataset_cfg.max_samples,
             },
