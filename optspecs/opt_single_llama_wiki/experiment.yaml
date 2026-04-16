@@ -1,0 +1,142 @@
+# Optimization experiment spec: Llama-3.1-8B WikiText-2 single-pipeline.
+
+nodes:
+  - A
+  - B
+  - C
+
+pipelines:
+  - name: llama-wiki-a
+    model: llama
+    partitions:
+      A: [p1]
+      B: [p2]
+      C: [p3]
+    flow: [A, B, C]
+    simulation_path: models/llama/llama-3.1-8b
+
+datasets:
+  llama:
+    name: wikitext2
+    path: .datasets/wikitext2
+    tokenizer_path: models/llama/.partitions/tokenizer
+    batch_size: 4
+    max_seq_len: 512
+    max_samples: 20
+    seed: 42
+
+stein_datasets:
+  llama:
+    name: wikitext2
+    path: .datasets/wikitext2
+    tokenizer_path: models/llama/.partitions/tokenizer
+    batch_size: 4
+    max_seq_len: 512
+    max_samples: 60
+    seed: 201
+
+workload:
+  pattern: fill
+  window_per_pipeline: 4
+  mix:
+    llama-wiki-a: 1.0
+
+tasks:
+  llama-wiki-a:
+    throughput_target: 0.2
+    task_weight: 1.0
+
+links:
+  - from: A
+    to: B
+    eta_min: 0.01
+    eta_max: 1.0
+    allowed_methods: [topk]
+
+  - from: B
+    to: C
+    eta_min: 0.01
+    eta_max: 1.0
+    allowed_methods: [topk]
+
+optimization_loop:
+  n_slots: 50
+  batches_per_slot: 4
+  profiling_batches: 4
+  link_probe_interval_slots: 1
+  epsilon: 0.01
+
+metrics_server:
+  host: metrics
+  port: 9100
+
+sub_experiments:
+
+  - name: profiling
+    type: profiling
+
+  - name: accuracy_model_llama_poly3
+    type: accuracy_model
+    pipeline_id: llama-wiki-a
+    model_type: gbm
+    sweep_design: random
+    n_sweep_samples: 100
+    dataset:
+      name: wikitext2
+      path: .datasets/wikitext2
+      tokenizer_path: models/llama/.partitions/tokenizer
+      batch_size: 10
+      max_seq_len: 512
+      max_samples: 40
+      seed: 100
+
+  - name: max_compression_single
+    type: max_compression_single
+
+  - name: no_compression_single
+    type: no_compression_single
+
+  - name: uniform_compression_single
+    type: uniform_compression_single
+
+  - name: myopic_single
+    type: estimated_csi_single
+    channel_estimator:
+      type: last_observation
+      warmup_value_bps: 1.0e8
+
+  - name: conservative_single
+    type: estimated_csi_single
+    channel_estimator:
+      type: running_min
+      warmup_value_bps: 1.0e8
+
+  - name: movingavg_single
+    type: estimated_csi_single
+    channel_estimator:
+      type: moving_average
+      warmup_value_bps: 1.0e8
+      
+  - name: csi_aware
+    type: csi_aware
+
+  - name: no_csi_am_poly3
+    type: no_csi
+    mu_sweep: [3.0]
+    accuracy_model_refs:
+      - accuracy_model_llama_poly3
+    channel_estimator:
+      type: lcb
+      warmup_value_bps: 1.0e8
+
+  - name: no_csi_stein_lcb
+    type: no_csi
+    mu_sweep: [3.0]
+    stein_config:
+      sigma: 0.05
+      N: 5
+      n_fast_samples: 20
+    channel_estimator:
+      type: lcb
+      warmup_value_bps: 1.0e8
+      
