@@ -67,11 +67,21 @@ def main() -> None:
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path("results"),
-        help="Root output directory (default: results/).",
+        default=None,
+        help=(
+            "Root output directory. Defaults to results/{exp_dir.name} when "
+            "--exp-dir is provided, otherwise results/."
+        ),
     )
 
     args = parser.parse_args()
+
+    # Resolve default output directory.
+    if args.output is None:
+        if args.exp_dir is not None:
+            args.output = Path("results") / args.exp_dir.name
+        else:
+            args.output = Path("results")
 
     ran_something = False
 
