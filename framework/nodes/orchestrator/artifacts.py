@@ -109,6 +109,7 @@ class ArtifactStore:
         n_sweep_samples: int,
         dataset_seed: int | None,
         dataset_max_samples: int | None,
+        dataset_name: str | None = None,
     ) -> Path:
         """Content-addressed path for a shared accuracy model artifact.
 
@@ -138,6 +139,10 @@ class ArtifactStore:
             dataset_seed: RNG seed used for the sweep dataset.
             dataset_max_samples: Cap on dataset size (affects evaluation cost
                 and training data distribution).
+            dataset_name: Dataset identifier, e.g. ``"wikitext2"`` or ``"mmlu"``.
+                Included in the uniqueness hash to prevent collisions between
+                accuracy models trained on different datasets with the same seed
+                and sample count.
 
         Returns:
             Base path (without suffix) under ``shared_root/accuracy_models/``.
@@ -171,6 +176,7 @@ class ArtifactStore:
             "compression_method_per_link": compression_method_per_link,
             "sweep_design": sweep_design,
             "n_sweep_samples": n_sweep_samples,
+            "dataset_name": dataset_name,
             "dataset_seed": dataset_seed,
             "dataset_max_samples": dataset_max_samples,
         }

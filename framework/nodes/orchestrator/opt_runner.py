@@ -716,6 +716,7 @@ class OptRunner:
             n_sweep_samples=sub_exp.n_sweep_samples,
             dataset_seed=dataset_cfg.seed,
             dataset_max_samples=dataset_cfg.max_samples,
+            dataset_name=dataset_cfg.name,
         )
         pkl_path = base_path.parent / (base_path.name + ".pkl")
         meta_path = base_path.parent / (base_path.name + ".json")
