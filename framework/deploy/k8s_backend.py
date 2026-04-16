@@ -769,6 +769,22 @@ def _opt_orchestrator_job(
             volumes.append({"name": "tokenizer", "hostPath": {"path": str(host_tok)}})
             break
 
+    seen_sim_paths: set[str] = set()
+    for i, pipeline in enumerate(exp.pipelines):
+        if pipeline.simulation_path is None:
+            continue
+        sim_path = pipeline.simulation_path
+        if sim_path in seen_sim_paths:
+            continue
+        seen_sim_paths.add(sim_path)
+        host_sim = Path(sim_path).resolve()
+        container_sim = _abs_container_path(sim_path)
+        vol_name = f"simulation-{i}"
+        volume_mounts.append(
+            {"name": vol_name, "mountPath": container_sim, "readOnly": True}
+        )
+        volumes.append({"name": vol_name, "hostPath": {"path": str(host_sim)}})
+
     return {
         "apiVersion": "batch/v1",
         "kind": "Job",
