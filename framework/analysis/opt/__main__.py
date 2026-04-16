@@ -154,13 +154,24 @@ def _print_sub_exp_table(df) -> None:
         "baseline_variant",
         "n_slots",
         "avg_utility",
+        "avg_achieved_rps",
+        "min_achieved_rps",
+        "max_achieved_rps",
         "avg_delay_ms",
         "excess_delay_ms",
         "delay_ratio",
     ]
     cols = [c for c in cols if c in df.columns]
     display = df[cols].copy()
-    for col in ("avg_utility", "avg_delay_ms", "excess_delay_ms", "delay_ratio"):
+    for col in (
+        "avg_utility",
+        "avg_achieved_rps",
+        "min_achieved_rps",
+        "max_achieved_rps",
+        "avg_delay_ms",
+        "excess_delay_ms",
+        "delay_ratio",
+    ):
         if col in display.columns:
             display[col] = display[col].map(
                 lambda x: f"{x:.4f}" if pd.notna(x) else "—"  # noqa: B023

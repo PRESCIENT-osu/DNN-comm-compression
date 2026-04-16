@@ -43,7 +43,7 @@ workload:
 
 tasks:
   llama-wiki-a:
-    throughput_target: 0.2
+    throughput_target: 0.18
     task_weight: 1.0
 
 links:

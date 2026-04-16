@@ -268,6 +268,8 @@ def build_sub_exp_table(
 
     avg_delay: pd.Series = pd.Series(dtype=float, name="avg_delay_ms")
     avg_achieved_rps: pd.Series = pd.Series(dtype=float, name="avg_achieved_rps")
+    min_achieved_rps: pd.Series = pd.Series(dtype=float, name="min_achieved_rps")
+    max_achieved_rps: pd.Series = pd.Series(dtype=float, name="max_achieved_rps")
     excess_delay: pd.Series = pd.Series(dtype=float, name="excess_delay_ms")
     delay_ratio: pd.Series = pd.Series(dtype=float, name="delay_ratio")
 
@@ -280,10 +282,15 @@ def build_sub_exp_table(
         # avg_delay_ms: mean actual delay (ms) over all (slot, pipeline) pairs
         avg_delay = c.groupby(_GRP)["_actual_delay_ms"].mean().rename("avg_delay_ms")
 
-        # avg_achieved_rps: mean achieved throughput (rps) over all
-        # (slot, pipeline) pairs.  Reported alongside target_rps in tasks config.
+        # avg/min/max achieved_rps over all (slot, pipeline) pairs
         avg_achieved_rps = (
             c.groupby(_GRP)["achieved_rps"].mean().rename("avg_achieved_rps")
+        )
+        min_achieved_rps = (
+            c.groupby(_GRP)["achieved_rps"].min().rename("min_achieved_rps")
+        )
+        max_achieved_rps = (
+            c.groupby(_GRP)["achieved_rps"].max().rename("max_achieved_rps")
         )
 
         # delay_ratio: mean(target_rps / achieved_rps); <1 means target exceeded
@@ -298,7 +305,15 @@ def build_sub_exp_table(
     # Combine on (sub_experiment_name, run_index) index
     # ------------------------------------------------------------------
     result: pd.DataFrame = n_slots.to_frame()
-    for series in (avg_utility, avg_achieved_rps, avg_delay, excess_delay, delay_ratio):
+    for series in (
+        avg_utility,
+        avg_achieved_rps,
+        min_achieved_rps,
+        max_achieved_rps,
+        avg_delay,
+        excess_delay,
+        delay_ratio,
+    ):
         if not series.empty:
             result = result.join(series, how="left")
 
