@@ -65,7 +65,7 @@ links:
     eta_max: 1.0
     allowed_methods: [topk, quantization, llmint8]
     llmint8_mapping:
-      resnet-a:
+      llama-mmlu-a:
         outlier_precision: fp16
         regular_precision: int2
 
@@ -75,7 +75,7 @@ links:
     eta_max: 1.0
     allowed_methods: [topk, quantization, llmint8]
     llmint8_mapping:
-      resnet-a:
+      llama-mmlu-a:
         outlier_precision: fp16
         regular_precision: int2
 

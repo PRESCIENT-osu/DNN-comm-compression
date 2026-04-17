@@ -347,8 +347,10 @@ class OptRunner:
         The scheme list is taken from ``exp.links[0].allowed_methods`` (or
         ``["topk"]`` when unset).  For each scheme the mapper is locked to that
         scheme via ``set_active_scheme`` and all sub-experiments are run in
-        order.  ``ProfilingSubExperiment`` is skipped on subsequent scheme
-        iterations because profiling is scheme-independent.
+        order.  Profiling runs per scheme because activation payload sizes
+        (``a_per_link_bytes``) and compression/decompression costs differ across
+        schemes — reusing topk profiling data would cause the optimizer's delay
+        model to overestimate transmission cost for quantization and llmint8.
 
         Sub-experiments are run sequentially within each scheme.  An exception
         in any phase propagates immediately and halts the run.
@@ -366,14 +368,6 @@ class OptRunner:
             )
 
             for sub_exp in self._exp.sub_experiments:
-                if scheme_idx > 0 and isinstance(sub_exp, ProfilingSubExperiment):
-                    logger.info(
-                        "[%s] Skipping profiling for scheme '%s' (already done)",
-                        sub_exp.name,
-                        scheme,
-                    )
-                    continue
-
                 scoped_name = f"{sub_exp.name}__{scheme}"
                 logger.info(
                     "=== Sub-experiment: %s (type=%s) scheme=%s ===",
@@ -411,7 +405,7 @@ class OptRunner:
         self, sub_exp: OptSubExperiment, scheme: str = "topk"
     ) -> None:
         if isinstance(sub_exp, ProfilingSubExperiment):
-            await self._run_profiling(sub_exp)
+            await self._run_profiling(sub_exp, scheme=scheme)
         elif isinstance(sub_exp, AccuracyModelSubExperiment):
             await self._run_accuracy_model(sub_exp, scheme=scheme)
         elif isinstance(sub_exp, NoCsiSubExperiment):
@@ -456,21 +450,34 @@ class OptRunner:
     # Phase: profiling
     # ------------------------------------------------------------------
 
-    async def _run_profiling(self, sub_exp: ProfilingSubExperiment) -> None:
-        """Run profiling at η=1.0 and store nominal-throughput artifacts.
+    async def _run_profiling(
+        self, sub_exp: ProfilingSubExperiment, scheme: str = "topk"
+    ) -> None:
+        """Run profiling at η=eta_max and store nominal-throughput artifacts.
 
-        Pushes no-compression config (η=eta_max) to all links, runs
-        ``profiling_batches`` inference rounds, probes all links, and
-        persists per-pipeline accuracy/latency + per-link nominal bps.
+        Pushes η=eta_max config with the active compression scheme to all
+        links, runs ``profiling_batches`` inference rounds, probes all links,
+        and persists per-pipeline accuracy/latency + per-link nominal bps.
+
+        Profiling runs once per scheme because ``a_per_link_bytes`` (the mean
+        activation payload size at η=eta_max) differs across schemes.  For
+        example, topk at η=1.0 on fp32 data includes a bitmask overhead,
+        quantization at η=1.0 snaps to fp16 (halving payload), and llmint8
+        at η=1.0 stores all values at outlier precision.
 
         Args:
             sub_exp: Profiling sub-experiment config.
+            scheme: Active compression scheme (used for artifact caching).
         """
-        artifact_path = self._artifacts.root / "profiling" / f"{sub_exp.name}.json"
+        artifact_path = (
+            self._artifacts.root / "profiling" / f"{sub_exp.name}_{scheme}.json"
+        )
         config_hash = self._artifacts.config_hash(
             {
                 "profiling_batches": self._exp.optimization_loop.profiling_batches,
                 "pipelines": [p.name for p in self._exp.pipelines],
+                "scheme": scheme,
+                "delay_model": "full_cycle_wire_overhead",
             }
         )
 
@@ -483,7 +490,7 @@ class OptRunner:
             self._perplexity_baselines = data.get("perplexity_baselines", {})
             return
 
-        # Push η=eta_max (no compression) to all links.
+        # Push η=eta_max with the active scheme to all links.
         pipeline_ids = [p.name for p in self._exp.pipelines]
         eta_full = {
             pid: {lk.link_id: lk.eta_max for lk in self._exp.links}
@@ -493,7 +500,7 @@ class OptRunner:
             eta_full, self._exp, self._mapper, self._node_host, _CONFIG_DRAIN_TIMEOUT_S
         )
 
-        run_id = f"{self._exp.name}_{sub_exp.name}"
+        run_id = f"{self._exp.name}_{sub_exp.name}_{scheme}"
 
         # Warm-up: run several untimed batches so CUDA JIT compiles on every node
         # before timed profiling begins.  A single batch is insufficient — the
@@ -543,10 +550,42 @@ class OptRunner:
         # in the external optimizer adapter.  Brief sleep first to allow nodes
         # to flush their async metric events before we query.
         await asyncio.sleep(2.0)
-        tau_per_node, a_per_link = await self._query_tau_and_a(
+        tau_per_node, a_per_link, send_duration_per_link = await self._query_tau_and_a(
             run_id=run_id,
             experiment_id=self._exp.name,
         )
+
+        # Wire-overhead correction: actual HTTP/JSON/base64 transfer is slower
+        # than raw-binary probe throughput.  Inflate a_per_link_bytes so the
+        # optimizer's delay term  a * eta / c  reflects real transfer cost.
+        #
+        # During profiling, W concurrent sends share the link, so the measured
+        # send_duration already includes bandwidth contention.  The slot loop
+        # separately divides c_t by W (for FILL workload), which handles
+        # concurrency.  To avoid double-counting, compute model_send_time
+        # using per-task capacity (probe_bps / W) so the wire_overhead factor
+        # captures only serialization/encoding overhead.
+        W = (
+            float(self._exp.workload.window_per_pipeline)
+            if self._exp.workload.pattern == WorkloadPattern.FILL
+            else 1.0
+        )
+        for link_id in list(a_per_link.keys()):
+            probe_bps = probe_results.get(link_id)
+            send_dur = send_duration_per_link.get(link_id)
+            if probe_bps and send_dur and probe_bps > 0 and send_dur > 0:
+                model_send_time = a_per_link[link_id] * 8 / (probe_bps / W)
+                if model_send_time > 0:
+                    wire_overhead = send_dur / model_send_time
+                    logger.info(
+                        "[%s] Wire overhead %s: model=%.1fms actual=%.1fms factor=%.2f",
+                        sub_exp.name,
+                        link_id,
+                        model_send_time * 1000,
+                        send_dur * 1000,
+                        wire_overhead,
+                    )
+                    a_per_link[link_id] *= wire_overhead
 
         per_pipeline: dict[str, Any] = {}
         for pipeline in self._exp.pipelines:
@@ -563,14 +602,16 @@ class OptRunner:
             "nominal_bps_per_link": probe_results,
             "tau_per_node_s": tau_per_node,
             "a_per_link_bytes": a_per_link,
+            "send_duration_per_link_s": send_duration_per_link,
             "perplexity_baselines": perplexity_baselines,
         }
         self._artifacts.write_json(artifact_path, artifact_data, config_hash)
         self._tau_per_node: dict[str, dict[str, float]] = tau_per_node
         self._a_per_link_bytes: dict[str, float] = a_per_link
         logger.info(
-            "[%s] Profiling complete: pipelines=%s links=%s tau_nodes=%s a_links=%s",
+            "[%s] Profiling complete (scheme=%s): pipelines=%s links=%s tau_nodes=%s a_links=%s",
             sub_exp.name,
+            scheme,
             list(per_pipeline.keys()),
             {k: f"{v / 1e6:.1f}Mbps" for k, v in probe_results.items()},
             list(tau_per_node.keys()),
@@ -581,12 +622,18 @@ class OptRunner:
         self,
         run_id: str,
         experiment_id: str,
-    ) -> tuple[dict[str, dict[str, float]], dict[str, float]]:
+    ) -> tuple[dict[str, dict[str, float]], dict[str, float], dict[str, float]]:
         """Query the metrics server for profiling timing and activation size data.
 
-        Fetches ``task_node_timing`` events (for per-node compute latency τ_i)
-        and ``send`` events (for per-link activation size a_i) emitted during
-        the profiling slot, then aggregates them.
+        Fetches ``task_node_timing`` events (for per-node full-cycle latency
+        τ_i = decompress + compute + compress), ``decompress`` events (for
+        decompress duration), and ``send`` events (for per-link activation size
+        a_i and transfer duration) emitted during the profiling slot.
+
+        τ includes the full node processing cycle so the optimizer's delay
+        model accounts for compress/decompress CPU overhead, not just the
+        forward pass.  Send durations are returned separately so the caller
+        can compute a wire-overhead correction on ``a``.
 
         Args:
             run_id: Run identifier used to filter events to this slot.
@@ -595,59 +642,93 @@ class OptRunner:
 
         Returns:
             Tuple of:
-              - ``tau_per_node_s``: ``{pipeline_id: {node_id: mean_compute_s}}``
+              - ``tau_per_node_s``: ``{pipeline_id: {node_id: mean_full_cycle_s}}``
               - ``a_per_link_bytes``: ``{link_id: mean_payload_bytes}``
+              - ``send_duration_per_link_s``: ``{link_id: mean_send_duration_s}``
         """
         tau_per_node: dict[str, dict[str, float]] = {}
         a_per_link: dict[str, float] = {}
+        send_duration_per_link: dict[str, float] = {}
 
         try:
+            from collections import defaultdict  # noqa: PLC0415
+
             async with httpx.AsyncClient(timeout=30.0) as client:
-                # --- tau: per-node compute latency ---
+                query_params = {
+                    "run_id": run_id,
+                    "experiment_name_contains": experiment_id,
+                    "limit": "10000",
+                }
+
+                # --- tau: full-cycle per-node latency ---
+                # task_node_timing carries compute_start/end and compress_start/end.
                 resp = await client.get(
                     f"{self._metrics_url}/metrics/query",
-                    params={
-                        "event_type": "task_node_timing",
-                        "run_id": run_id,
-                        "experiment_name_contains": experiment_id,
-                        "limit": "10000",
-                    },
+                    params={"event_type": "task_node_timing", **query_params},
                 )
                 resp.raise_for_status()
                 timing_events: list[dict[str, Any]] = resp.json().get("events", [])
 
-                # Accumulate compute durations per (pipeline_id, node_id).
-                from collections import defaultdict  # noqa: PLC0415
-
-                sums: dict[tuple[str, str], float] = defaultdict(float)
-                counts: dict[tuple[str, str], int] = defaultdict(int)
+                compute_sums: dict[tuple[str, str], float] = defaultdict(float)
+                compress_sums: dict[tuple[str, str], float] = defaultdict(float)
+                timing_counts: dict[tuple[str, str], int] = defaultdict(int)
                 for ev in timing_events:
                     pid = ev.get("pipeline_id")
                     nid = ev.get("node_id")
                     cs = ev.get("compute_start")
                     ce = ev.get("compute_end")
                     if pid and nid and cs is not None and ce is not None:
-                        sums[(pid, nid)] += float(ce) - float(cs)
-                        counts[(pid, nid)] += 1
+                        key = (pid, nid)
+                        compute_sums[key] += float(ce) - float(cs)
+                        cps = ev.get("compress_start")
+                        cpe = ev.get("compress_end")
+                        if cps is not None and cpe is not None:
+                            compress_sums[key] += float(cpe) - float(cps)
+                        timing_counts[key] += 1
 
-                for (pid, nid), total in sums.items():
-                    tau_per_node.setdefault(pid, {})[nid] = total / counts[(pid, nid)]
-
-                # --- a_i: per-link mean payload bytes ---
+                # Decompress events are emitted separately with duration_ms.
                 resp = await client.get(
                     f"{self._metrics_url}/metrics/query",
-                    params={
-                        "event_type": "send",
-                        "run_id": run_id,
-                        "experiment_name_contains": experiment_id,
-                        "limit": "10000",
-                    },
+                    params={"event_type": "decompress", **query_params},
+                )
+                resp.raise_for_status()
+                decompress_events: list[dict[str, Any]] = resp.json().get("events", [])
+
+                decompress_sums: dict[tuple[str, str], float] = defaultdict(float)
+                decompress_counts: dict[tuple[str, str], int] = defaultdict(int)
+                for ev in decompress_events:
+                    pid = ev.get("pipeline_id")
+                    nid = ev.get("node")
+                    dur = ev.get("duration_ms")
+                    if pid and nid and dur is not None:
+                        key = (pid, nid)
+                        decompress_sums[key] += float(dur) / 1000.0
+                        decompress_counts[key] += 1
+
+                # tau_full = mean(decompress) + mean(compute) + mean(compress)
+                all_keys = set(timing_counts.keys()) | set(decompress_counts.keys())
+                for key in all_keys:
+                    pid, nid = key
+                    tau = 0.0
+                    if key in decompress_counts and decompress_counts[key] > 0:
+                        tau += decompress_sums[key] / decompress_counts[key]
+                    if key in timing_counts and timing_counts[key] > 0:
+                        tau += compute_sums[key] / timing_counts[key]
+                        tau += compress_sums[key] / timing_counts[key]
+                    tau_per_node.setdefault(pid, {})[nid] = tau
+
+                # --- a_i: per-link mean payload bytes and send duration ---
+                resp = await client.get(
+                    f"{self._metrics_url}/metrics/query",
+                    params={"event_type": "send", **query_params},
                 )
                 resp.raise_for_status()
                 send_events: list[dict[str, Any]] = resp.json().get("events", [])
 
                 byte_sums: dict[str, float] = defaultdict(float)
                 byte_counts: dict[str, int] = defaultdict(int)
+                dur_sums: dict[str, float] = defaultdict(float)
+                dur_counts: dict[str, int] = defaultdict(int)
                 for ev in send_events:
                     fn = ev.get("from_node")
                     tn = ev.get("to_node")
@@ -656,9 +737,15 @@ class OptRunner:
                         link_id = f"{fn}-{tn}"
                         byte_sums[link_id] += float(pb)
                         byte_counts[link_id] += 1
+                        dur = ev.get("duration_ms")
+                        if dur is not None:
+                            dur_sums[link_id] += float(dur) / 1000.0
+                            dur_counts[link_id] += 1
 
                 for link_id, total in byte_sums.items():
                     a_per_link[link_id] = total / byte_counts[link_id]
+                for link_id, total in dur_sums.items():
+                    send_duration_per_link[link_id] = total / dur_counts[link_id]
 
         except Exception as exc:
             logger.warning(
@@ -667,7 +754,7 @@ class OptRunner:
                 exc,
             )
 
-        return tau_per_node, a_per_link
+        return tau_per_node, a_per_link, send_duration_per_link
 
     # ------------------------------------------------------------------
     # Phase: accuracy model

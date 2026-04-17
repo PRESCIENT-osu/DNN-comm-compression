@@ -52,11 +52,15 @@ if [ "$has_tc" = true ]; then
         CLASSID="1:$((i + 1))"
         HANDLE="$((i + 10)):"
 
-        # HTB class — rate limit if MBPS set, else pass-through at line rate
+        # HTB class — rate limit if MBPS set, else pass-through at line rate.
+        # Explicit burst sized at 10ms of line-rate data prevents the default
+        # burst (rate/HZ, often ~125KB at HZ=1000) from starving single TCP
+        # flows and capping effective throughput far below the configured rate.
         if [ -n "$MBPS" ]; then
-            tc class add dev eth0 parent 1: classid "$CLASSID" htb rate "${MBPS}mbit"
+            BURST=$(( MBPS * 1250 ))
+            tc class add dev eth0 parent 1: classid "$CLASSID" htb rate "${MBPS}mbit" burst "$BURST"
         else
-            tc class add dev eth0 parent 1: classid "$CLASSID" htb rate 1000mbit
+            tc class add dev eth0 parent 1: classid "$CLASSID" htb rate 1000mbit burst 1250000
         fi
 
         # netem leaf qdisc for delay / loss if either is set

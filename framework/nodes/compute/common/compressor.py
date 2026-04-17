@@ -127,7 +127,7 @@ class TopK(Compressor):
         packed_mask = np.packbits(mask_np, axis=1)
 
         payload = {
-            "values": sorted_values.cpu().float().numpy(),
+            "values": sorted_values.cpu().numpy(),
             "packed_mask": packed_mask,
             "shape": original_shape,
             "elements_per_sample": elements_per_sample,
@@ -172,7 +172,7 @@ class TopK(Compressor):
         packed_mask = np.packbits(mask_np, axis=1)
 
         payload = {
-            "values": sorted_values.cpu().float().numpy(),
+            "values": sorted_values.cpu().numpy(),
             "packed_mask": packed_mask,
             "shape": original_shape,
             "elements_per_sample": D,
@@ -219,7 +219,7 @@ class RandomK(Compressor):
             "dtype": tensor.dtype,
             "numel": flat.numel(),
             "indices": indices.cpu().numpy(),
-            "values": values.cpu().float().numpy(),
+            "values": values.cpu().numpy(),
         }
         return pickle.dumps(payload)
 

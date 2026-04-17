@@ -16,6 +16,20 @@ Supported methods
                      ``outlier_precision`` (default: fp16) and the rest at
                      ``regular_precision`` (default: int8).
                      Params: ``{"rate": eta, "outlier_precision": ..., "regular_precision": ...}``.
+
+Quantization discretisation
+---------------------------
+The quantization scheme has only four effective levels.  The nearest-neighbour
+snapping means the optimizer's continuous η collapses to these bands::
+
+    η ∈ [0.375,  1.0   ) → rate = 0.5    (fp16,  2× compression)
+    η ∈ [0.1875, 0.375 ) → rate = 0.25   (int8,  4× compression)
+    η ∈ [0.09375,0.1875) → rate = 0.125  (int4,  8× compression)
+    η ∈ [0.0,    0.09375) → rate = 0.0625 (int2, 16× compression)
+
+Any fine-grained η variation within a band has zero effect on the physical
+compression.  The external optimizer is unaware of this discretisation — it
+treats η as continuous.  Use ``snap_eta`` to query the effective η.
 """
 
 from __future__ import annotations
