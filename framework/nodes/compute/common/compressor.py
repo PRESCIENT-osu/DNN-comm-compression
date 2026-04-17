@@ -127,7 +127,9 @@ class TopK(Compressor):
         packed_mask = np.packbits(mask_np, axis=1)
 
         payload = {
-            "values": sorted_values.cpu().numpy(),
+            "values": sorted_values.cpu().to(torch.float16).numpy()
+            if tensor.dtype == torch.bfloat16
+            else sorted_values.cpu().numpy(),
             "packed_mask": packed_mask,
             "shape": original_shape,
             "elements_per_sample": elements_per_sample,
@@ -172,7 +174,9 @@ class TopK(Compressor):
         packed_mask = np.packbits(mask_np, axis=1)
 
         payload = {
-            "values": sorted_values.cpu().numpy(),
+            "values": sorted_values.cpu().to(torch.float16).numpy()
+            if tensor.dtype == torch.bfloat16
+            else sorted_values.cpu().numpy(),
             "packed_mask": packed_mask,
             "shape": original_shape,
             "elements_per_sample": D,
