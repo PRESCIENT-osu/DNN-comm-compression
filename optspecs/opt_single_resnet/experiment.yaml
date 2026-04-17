@@ -177,7 +177,7 @@ sub_experiments:
     type: no_csi
     mu_sweep: [4.0]
     accuracy_model_refs:
-      - accuracy_model_resnet_mlp
+      - accuracy_model_resnet_poly3
     channel_estimator:
       type: lcb
       warmup_value_bps: 1.0e8
