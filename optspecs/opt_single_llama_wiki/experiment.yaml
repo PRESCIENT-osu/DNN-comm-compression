@@ -21,7 +21,7 @@ datasets:
     path: .datasets/wikitext2
     tokenizer_path: models/llama/.partitions/tokenizer
     batch_size: 2
-    max_seq_len: 512
+    max_seq_len: 256
     max_samples: 100
     seed: 42
 
@@ -31,7 +31,7 @@ stein_datasets:
     path: .datasets/wikitext2
     tokenizer_path: models/llama/.partitions/tokenizer
     batch_size: 4
-    max_seq_len: 512
+    max_seq_len: 256
     max_samples: 60
     seed: 201
 
@@ -94,7 +94,7 @@ sub_experiments:
       path: .datasets/wikitext2
       tokenizer_path: models/llama/.partitions/tokenizer
       batch_size: 10
-      max_seq_len: 512
+      max_seq_len: 256
       max_samples: 40
       seed: 100
 
