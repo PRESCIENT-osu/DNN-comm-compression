@@ -74,6 +74,23 @@ def main() -> None:
         ),
     )
 
+    metric_group = parser.add_mutually_exclusive_group()
+    metric_group.add_argument(
+        "--regular",
+        dest="metric_mode",
+        action="store_const",
+        const="regular",
+        default="regular",
+        help=("Print avg. utility, avg. delay, excess delay, delay ratio (default)."),
+    )
+    metric_group.add_argument(
+        "--rps",
+        dest="metric_mode",
+        action="store_const",
+        const="rps",
+        help="Print avg. RPS, min. RPS, max. RPS.",
+    )
+
     args = parser.parse_args()
 
     # Resolve default output directory.
@@ -114,7 +131,7 @@ def main() -> None:
             out_path = tables_dir / "sub_exp_table.csv"
             sub_exp_df.to_csv(out_path, index=False)
             logger.info("  Wrote %s", out_path)
-            _print_sub_exp_table(sub_exp_df)
+            _print_sub_exp_table(sub_exp_df, args.metric_mode)
 
         ran_something = True
 
@@ -149,46 +166,46 @@ def main() -> None:
     logger.info("Done. Output: %s", args.output)
 
 
-def _print_sub_exp_table(df) -> None:
-    """Print the sub-experiment table to stdout."""
+_ID_COLS = [
+    "sub_experiment_name",
+    "sub_exp_type",
+    "compression_scheme",
+    "backend",
+    "surrogate_type",
+    "estimator_type",
+    "mu",
+    "baseline_variant",
+    "n_slots",
+]
+
+_REGULAR_COLS = ["avg_utility", "avg_delay_ms", "excess_delay_ms", "delay_ratio"]
+_RPS_COLS = ["avg_achieved_rps", "min_achieved_rps", "max_achieved_rps"]
+
+
+def _print_sub_exp_table(df, metric_mode: str = "regular") -> None:
+    """Print the sub-experiment table to stdout.
+
+    Args:
+        df: Sub-experiment performance DataFrame.
+        metric_mode: ``"regular"`` for utility/delay metrics;
+            ``"rps"`` for throughput metrics.
+    """
     import pandas as pd  # noqa: PLC0415
 
-    cols = [
-        "sub_experiment_name",
-        "sub_exp_type",
-        "compression_scheme",
-        "backend",
-        "surrogate_type",
-        "estimator_type",
-        "mu",
-        "baseline_variant",
-        "n_slots",
-        "avg_utility",
-        "avg_achieved_rps",
-        "min_achieved_rps",
-        "max_achieved_rps",
-        "avg_delay_ms",
-        "excess_delay_ms",
-        "delay_ratio",
-    ]
-    cols = [c for c in cols if c in df.columns]
+    metric_cols = _RPS_COLS if metric_mode == "rps" else _REGULAR_COLS
+    cols = [c for c in _ID_COLS + metric_cols if c in df.columns]
     display = df[cols].copy()
-    for col in (
-        "avg_utility",
-        "avg_achieved_rps",
-        "min_achieved_rps",
-        "max_achieved_rps",
-        "avg_delay_ms",
-        "excess_delay_ms",
-        "delay_ratio",
-    ):
+    for col in metric_cols:
         if col in display.columns:
             display[col] = display[col].map(
                 lambda x: f"{x:.4f}" if pd.notna(x) else "—"  # noqa: B023
             )
 
+    title = (
+        "RPS METRICS" if metric_mode == "rps" else "SUB-EXPERIMENT PERFORMANCE TABLE"
+    )
     print("\n" + "=" * 100)
-    print("SUB-EXPERIMENT PERFORMANCE TABLE")
+    print(title)
     print("=" * 100)
     print(display.to_string(index=False))
     print("=" * 100 + "\n")
