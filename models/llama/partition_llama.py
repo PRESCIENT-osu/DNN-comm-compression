@@ -19,7 +19,7 @@ Usage:
   python models/llama/partition_llama.py \\
     --model meta-llama/Llama-3.1-8B \\
     --output-dir models/llama/.partitions \\
-    --dtype bf16 \\
+    --dtype fp16 \\
     [--verify]
 """
 
@@ -462,8 +462,8 @@ def main() -> None:
     parser.add_argument(
         "--dtype",
         choices=["bf16", "fp16", "fp32"],
-        default="bf16",
-        help="Weight dtype (default: bf16)",
+        default="fp16",
+        help="Weight dtype (default: fp16)",
     )
     parser.add_argument(
         "--verify",

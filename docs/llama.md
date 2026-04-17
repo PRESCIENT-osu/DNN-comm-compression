@@ -44,13 +44,13 @@ export $(grep -v '^#' .env | xargs)
 python models/llama/partition_llama.py \
   --model meta-llama/Llama-3.1-8B \
   --output-dir models/llama/.partitions \
-  --dtype bf16
+  --dtype fp16
 
 # Optional: verify output matches the full model (top-1 token agreement ≥ 99%)
 python models/llama/partition_llama.py \
   --model meta-llama/Llama-3.1-8B \
   --output-dir models/llama/.partitions \
-  --dtype bf16 --verify
+  --dtype fp16 --verify
 ```
 
 **Output** (`models/llama/.partitions/`, gitignored):
@@ -59,7 +59,7 @@ python models/llama/partition_llama.py \
 - `p3.pt` — layers 22–31 + norm + lm_head
 - `tokenizer/` — saved tokenizer (used by the data client at experiment runtime)
 
-**Dtype options**: `bf16` (default, preferred on Ampere+), `fp16`, `fp32`. Use `fp32` only for debugging — it doubles memory use.
+**Dtype options**: `fp16` (default), `bf16`, `fp32`. Use `fp32` only for debugging — it doubles memory use.
 
 **Local model path**: pass a directory path instead of a HuggingFace repo ID if you have weights locally:
 ```bash

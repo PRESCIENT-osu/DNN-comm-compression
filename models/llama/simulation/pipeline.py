@@ -105,7 +105,7 @@ class SimulatedLlamaPipeline:
             the deployed compressor's round-trip information loss for that link.
             If ``None``, defaults to ``topk_sparsify_per_sample`` for all links.
         device: Compute device.  Defaults to CUDA if available, else CPU.
-        torch_dtype: Model weight dtype.  Defaults to bfloat16 on CUDA.
+        torch_dtype: Model weight dtype.  Defaults to float16 on CUDA.
     """
 
     def __init__(
@@ -123,9 +123,7 @@ class SimulatedLlamaPipeline:
             torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
         )
         if torch_dtype is None:
-            torch_dtype = (
-                torch.bfloat16 if self.device.type == "cuda" else torch.float32
-            )
+            torch_dtype = torch.float16 if self.device.type == "cuda" else torch.float32
 
         self.fast_evaluator = fast_evaluator
         self.full_evaluator = full_evaluator
