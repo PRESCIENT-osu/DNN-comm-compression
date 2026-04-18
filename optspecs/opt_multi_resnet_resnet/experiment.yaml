@@ -1,4 +1,4 @@
-# Optimization experiment spec: ResNet56 single-pipeline
+# Optimization experiment spec: ResNet56 multi-pipeline
 
 nodes:
   - A
@@ -7,6 +7,15 @@ nodes:
 
 pipelines:
   - name: resnet-a
+    model: resnet
+    partitions:
+      A: [p1, p2]
+      B: [p3, p4]
+      C: [p5]
+    flow: [A, B, C]
+    simulation_path: models/resnet/resnet56-4bfd9763.th
+
+  - name: resnet-b
     model: resnet
     partitions:
       A: [p1, p2]
@@ -34,12 +43,17 @@ workload:
   pattern: fill
   window_per_pipeline: 4
   mix:
-    resnet-a: 1.0
+    resnet-a: 0.5
+    resnet-b: 0.5
 
+# Per-pipeline throughput targets (R_k) and WFQ compute share weights (s_comp).
 tasks:
   resnet-a:
-    throughput_target: 2.0
-    task_weight: 1.0
+    throughput_target: 5.0   # tasks/second
+    task_weight: 0.5         # proportional WFQ weight
+  resnet-b:
+    throughput_target: 5.0
+    task_weight: 0.5
 
 links:
   - from: A
@@ -49,6 +63,9 @@ links:
     allowed_methods: [topk, quantization, llmint8]
     llmint8_mapping:
       resnet-a:
+        outlier_precision: fp16
+        regular_precision: int2
+      resnet-b:
         outlier_precision: fp16
         regular_precision: int2
 
@@ -61,12 +78,15 @@ links:
       resnet-a:
         outlier_precision: fp16
         regular_precision: int2
+      resnet-b:
+        outlier_precision: fp16
+        regular_precision: int2
 
 optimization_loop:
   n_slots: 50
   batches_per_slot: 10
   profiling_batches: 4
-  link_probe_interval_slots: 5
+  link_probe_interval_slots: 8
   epsilon: 0.1
 
 metrics_server:
@@ -78,33 +98,7 @@ sub_experiments:
   - name: profiling
     type: profiling
 
-  - name: accuracy_model_resnet_gbm
-    type: accuracy_model
-    pipeline_id: resnet-a
-    model_type: gbm
-    sweep_design: random
-    n_sweep_samples: 1000
-    dataset:
-      name: cifar10
-      path: .datasets/cifar10
-      batch_size: 25
-      max_samples: 100
-      seed: 100
-
-  - name: accuracy_model_resnet_poly2
-    type: accuracy_model
-    pipeline_id: resnet-a
-    model_type: poly2
-    sweep_design: random
-    n_sweep_samples: 1000
-    dataset:
-      name: cifar10
-      path: .datasets/cifar10
-      batch_size: 25
-      max_samples: 100
-      seed: 100
-
-  - name: accuracy_model_resnet_poly3
+  - name: accuracy_model_resnet-a_poly3
     type: accuracy_model
     pipeline_id: resnet-a
     model_type: poly3
@@ -117,10 +111,10 @@ sub_experiments:
       max_samples: 100
       seed: 100
 
-  - name: accuracy_model_resnet_rf
+  - name: accuracy_model_resnet-b_poly3
     type: accuracy_model
-    pipeline_id: resnet-a
-    model_type: rf
+    pipeline_id: resnet-b
+    model_type: poly3
     sweep_design: random
     n_sweep_samples: 1000
     dataset:
@@ -130,44 +124,43 @@ sub_experiments:
       max_samples: 100
       seed: 100
 
-  - name: accuracy_model_resnet_mlp
-    type: accuracy_model
-    pipeline_id: resnet-a
-    model_type: mlp
-    sweep_design: random
-    n_sweep_samples: 1000
-    dataset:
-      name: cifar10
-      path: .datasets/cifar10
-      batch_size: 25
-      max_samples: 100
-      seed: 100
+  - name: max_compression_multi
+    type: max_compression_multi
 
-  - name: max_compression_single
-    type: max_compression_single
+  - name: no_compression_multi
+    type: no_compression_multi
 
-  - name: no_compression_single
-    type: no_compression_single
+  - name: static_equal_share
+    type: static_equal_share
 
-  - name: uniform_compression_single
-    type: uniform_compression_single
+  - name: proportional_resource
+    type: proportional_resource
 
-  - name: myopic_single
-    type: estimated_csi_single
-    channel_estimator:
-      type: last_observation
-      warmup_value_bps: 1.0e8
+  - name: strict_priority_greedy
+    type: strict_priority_greedy
 
-  - name: conservative_single
-    type: estimated_csi_single
-    channel_estimator:
-      type: running_min
-      warmup_value_bps: 1.0e8
-
-  - name: movingavg_single
-    type: estimated_csi_single
+  - name: decoupled_descent
+    type: decoupled_descent
+    mu: 1.0
+    epsilon: 0.1
     channel_estimator:
       type: moving_average
+      window_size: 10
+      warmup_value_bps: 1.0e8
+
+  - name: queue_proportional
+    type: queue_proportional
+    mu: 1.0
+    epsilon: 0.1
+    channel_estimator:
+      type: moving_average
+      window_size: 10
+      warmup_value_bps: 1.0e8
+
+  - name: historical_average_ce
+    type: historical_average_ce
+    channel_estimator:
+      type: mean
       warmup_value_bps: 1.0e8
       
   - name: csi_aware
@@ -175,16 +168,18 @@ sub_experiments:
 
   - name: no_csi_am_poly3
     type: no_csi
-    mu_sweep: [4.0]
+    mu_sweep: [3.0]
     accuracy_model_refs:
-      - accuracy_model_resnet_poly3
+      - accuracy_model_resnet-a_poly3
+      - accuracy_model_resnet-b_poly3
+    bcd_iterations: 5  # BCD iterations J per slot (multi-task only; ignored for single-task)
     channel_estimator:
       type: lcb
       warmup_value_bps: 1.0e8
 
   - name: no_csi_stein_lcb
     type: no_csi
-    mu_sweep: [4.0]
+    mu_sweep: [3.0]
     stein_config:
       sigma: 0.05
       N: 10
