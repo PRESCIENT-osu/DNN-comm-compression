@@ -12,9 +12,16 @@ class InferRequest(BaseModel):
     callback_url: str
     experiment_id: str
     run_id: str
-    data: str  # base64-encoded bytes (compressed activation or raw input)
+    data: bytes  # raw binary (compressed activation or pickled input)
     attention_mask: str | None = (
         None  # base64-encoded pickled bool tensor [B, L]; MMLU only
+    )
+    input_ids: str | None = (
+        None  # base64-encoded pickled int tensor [B, L]; WikiText only
+    )
+    metric_type: str | None = None  # "perplexity" or "accuracy"; None for ResNet
+    answer_token_ids: str | None = (
+        None  # comma-separated token IDs for MMLU answer choices
     )
 
 
@@ -33,7 +40,7 @@ class ResultPayload(BaseModel):
     """Payload POSTed by the last compute node to the orchestrator callback."""
 
     task_id: str
-    data: str  # base64-encoded pickled output tensor
+    data: bytes  # pickled output tensor (raw binary)
 
 
 class MultiInferRequest(BaseModel):
@@ -44,9 +51,16 @@ class MultiInferRequest(BaseModel):
     callback_url: str
     experiment_id: str
     run_id: str
-    data: str  # base64-encoded bytes (compressed activation or raw input)
+    data: bytes  # raw binary (compressed activation or pickled input)
     attention_mask: str | None = (
         None  # base64-encoded pickled bool tensor [B, L]; MMLU only
+    )
+    input_ids: str | None = (
+        None  # base64-encoded pickled int tensor [B, L]; WikiText only
+    )
+    metric_type: str | None = None  # "perplexity" or "accuracy"; None for ResNet
+    answer_token_ids: str | None = (
+        None  # comma-separated token IDs for MMLU answer choices
     )
 
 

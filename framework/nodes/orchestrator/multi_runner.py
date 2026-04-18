@@ -27,7 +27,7 @@ from typing import Any
 import httpx
 import torch
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from framework.datamodels.api import ResultPayload
@@ -658,6 +658,13 @@ class MultiDataClient:
                     experiment_id=self._exp.name,
                     run_id=run.run_id,
                     attention_mask=attention_mask,
+                    metric_type=loader.metric_type,
+                    answer_token_ids=loader.answer_token_ids_csv,
+                    input_ids_header=(
+                        base64.b64encode(pickle.dumps(input_tensor)).decode()
+                        if loader.metric_type == "perplexity"
+                        else None
+                    ),
                 )
                 result_payload = await asyncio.wait_for(
                     future, timeout=self._result_timeout_s
@@ -838,7 +845,10 @@ class MultiDataClient:
         client_ref = self
 
         @app.post("/result")
-        async def handle_result(payload: ResultPayload) -> JSONResponse:
+        async def handle_result(request: Request) -> JSONResponse:
+            task_id = request.headers.get("x-task-id", "")
+            data = await request.body()
+            payload = ResultPayload(task_id=task_id, data=data)
             future = client_ref._pending.get(payload.task_id)
             if future and not future.done():
                 future.set_result(payload)
@@ -948,17 +958,33 @@ class _PipelineLoader:
             # Llama loaders already yield 4-tuples.
             yield from self._loader.batches()
 
+    @property
+    def metric_type(self) -> str | None:
+        """Return the metric type header value for on-node computation, or None for ResNet."""
+        if self._metric_type == "perplexity":
+            return "perplexity"
+        if self._metric_type == "accuracy_llama":
+            return "accuracy"
+        return None
+
+    @property
+    def answer_token_ids_csv(self) -> str | None:
+        """Return comma-separated answer token IDs for MMLU, or None."""
+        if self._answer_token_ids is not None:
+            return ",".join(str(t) for t in self._answer_token_ids)
+        return None
+
     def num_batches(self) -> int:
         """Return the total number of batches in this pipeline's dataset."""
         return self._loader.num_batches()
 
     def decode(
-        self, data: str, input_tensor: torch.Tensor | None
+        self, data: bytes, input_tensor: torch.Tensor | None
     ) -> tuple[float, int] | list[int]:
         """Decode a raw result payload into a metric-specific output.
 
         Args:
-            data: Base64-encoded pickled result tensor from the last node.
+            data: Pickled result tensor from the last node (raw bytes).
             input_tensor: Original input sent to the first node.  Required for
                 WikiText-2 perplexity (used to compute shift-labels).
 
@@ -979,7 +1005,7 @@ class _PipelineLoader:
 
             return _decode_mmlu_result(data, self._answer_token_ids)  # type: ignore[arg-type]
         else:
-            tensor: torch.Tensor = pickle.loads(base64.b64decode(data))
+            tensor: torch.Tensor = pickle.loads(data)
             return tensor.argmax(dim=1).tolist()
 
 
@@ -997,6 +1023,9 @@ async def _post_infer(
     experiment_id: str,
     run_id: str,
     attention_mask: torch.Tensor | None = None,
+    metric_type: str | None = None,
+    answer_token_ids: str | None = None,
+    input_ids_header: str | None = None,
 ) -> None:
     """Pickle and POST a task to a multi-model pipeline's first node.
 
@@ -1010,23 +1039,31 @@ async def _post_infer(
         run_id: Run identifier for metrics tagging.
         attention_mask: Optional padding mask [B, L]; present for MMLU batches
             with batch_size > 1.
+        metric_type: ``"perplexity"`` or ``"accuracy"`` for on-node computation.
+        answer_token_ids: Comma-separated token IDs for MMLU answer choices.
+        input_ids_header: Base64-encoded pickled input_ids for WikiText perplexity.
     """
-    raw = base64.b64encode(pickle.dumps(input_tensor)).decode()
-    payload: dict[str, str | None] = {
-        "task_id": task_id,
-        "pipeline_id": pipeline_id,
-        "callback_url": callback_url,
-        "experiment_id": experiment_id,
-        "run_id": run_id,
-        "data": raw,
-        "attention_mask": (
-            base64.b64encode(pickle.dumps(attention_mask.bool())).decode()
-            if attention_mask is not None
-            else None
-        ),
+    data = pickle.dumps(input_tensor)
+    headers: dict[str, str] = {
+        "x-task-id": task_id,
+        "x-pipeline-id": pipeline_id,
+        "x-callback-url": callback_url,
+        "x-experiment-id": experiment_id,
+        "x-run-id": run_id,
+        "content-type": "application/octet-stream",
     }
+    if attention_mask is not None:
+        headers["x-attention-mask"] = base64.b64encode(
+            pickle.dumps(attention_mask.bool())
+        ).decode()
+    if metric_type is not None:
+        headers["x-metric-type"] = metric_type
+    if answer_token_ids is not None:
+        headers["x-answer-token-ids"] = answer_token_ids
+    if input_ids_header is not None:
+        headers["x-input-ids"] = input_ids_header
     async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.post(first_node_url, json=payload)
+        resp = await client.post(first_node_url, content=data, headers=headers)
         resp.raise_for_status()
 
 

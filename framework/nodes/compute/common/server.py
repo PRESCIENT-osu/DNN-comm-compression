@@ -13,6 +13,7 @@ from typing import Any
 
 import httpx
 import torch
+import torch.nn.functional as F
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
@@ -155,9 +156,10 @@ def build_app(
     # -----------------------------------------------------------------------
 
     @app.post("/infer", status_code=202)
-    async def infer(request: InferRequest) -> JSONResponse:
+    async def infer(http_request: Request) -> JSONResponse:
         state = _state[0]
         assert state is not None
+        request = await _parse_infer_request(http_request)
         state.increment_in_flight()
         asyncio.create_task(
             _process_inference(state, request), name=f"infer-{request.task_id}"
@@ -254,6 +256,42 @@ def build_app(
 
 
 # ---------------------------------------------------------------------------
+# Request parsing
+# ---------------------------------------------------------------------------
+
+
+async def _parse_infer_request(http_request: Request) -> InferRequest:
+    """Parse an infer request from either JSON (legacy) or binary format."""
+    content_type = http_request.headers.get("content-type", "")
+    if "application/json" in content_type:
+        body = await http_request.json()
+        return InferRequest(
+            task_id=body["task_id"],
+            callback_url=body["callback_url"],
+            experiment_id=body["experiment_id"],
+            run_id=body["run_id"],
+            data=base64.b64decode(body["data"]),
+            attention_mask=body.get("attention_mask"),
+            input_ids=body.get("input_ids"),
+            metric_type=body.get("metric_type"),
+            answer_token_ids=body.get("answer_token_ids"),
+        )
+    data = await http_request.body()
+    headers = http_request.headers
+    return InferRequest(
+        task_id=headers["x-task-id"],
+        callback_url=headers["x-callback-url"],
+        experiment_id=headers["x-experiment-id"],
+        run_id=headers["x-run-id"],
+        data=data,
+        attention_mask=headers.get("x-attention-mask"),
+        input_ids=headers.get("x-input-ids"),
+        metric_type=headers.get("x-metric-type"),
+        answer_token_ids=headers.get("x-answer-token-ids"),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Background: inference processing
 # ---------------------------------------------------------------------------
 
@@ -262,9 +300,8 @@ async def _process_inference(state: NodeState, request: InferRequest) -> None:
     state.last_experiment_id = request.experiment_id
     state.last_run_id = request.run_id
     try:
-        raw_bytes = base64.b64decode(request.data)
+        raw_bytes = request.data
 
-        # Deserialize attention_mask if present (MMLU batches with batch_size > 1).
         attention_mask: torch.Tensor | None = None
         if request.attention_mask is not None:
             attention_mask = pickle.loads(base64.b64decode(request.attention_mask))
@@ -315,7 +352,7 @@ async def _process_inference(state: NodeState, request: InferRequest) -> None:
         )
 
         if state.is_last_node:
-            result_bytes = pickle.dumps(tensor.cpu())
+            result_bytes = _compute_result(tensor, request)
             await _send_result(request.task_id, request.callback_url, result_bytes)
             return
 
@@ -363,31 +400,63 @@ async def _process_inference(state: NodeState, request: InferRequest) -> None:
         state.decrement_in_flight()
 
 
+def _compute_result(tensor: torch.Tensor, request: InferRequest) -> bytes:
+    """Compute the final result at the last node.
+
+    For Llama WikiText/MMLU, computes the metric on-node to avoid
+    transferring the full logit tensor.
+    """
+    if request.metric_type == "perplexity" and request.input_ids is not None:
+        input_ids = pickle.loads(base64.b64decode(request.input_ids))
+        shift_logits = tensor[:, :-1, :].contiguous().float()
+        shift_labels = input_ids[:, 1:].contiguous().long().to(tensor.device)
+        B, L_minus_1, V = shift_logits.shape
+        nll = F.cross_entropy(
+            shift_logits.view(-1, V),
+            shift_labels.view(-1),
+            reduction="sum",
+        ).item()
+        return pickle.dumps((nll, B * L_minus_1))
+    if request.metric_type == "accuracy" and request.answer_token_ids is not None:
+        ids = [int(x) for x in request.answer_token_ids.split(",")]
+        last_logits = tensor[:, -1, :]
+        cand_logits = last_logits[:, ids]
+        return pickle.dumps(cand_logits.argmax(dim=-1).tolist())
+    return pickle.dumps(tensor.cpu())
+
+
 async def _forward_to_next(
     next_url: str, request: InferRequest, compressed: bytes
 ) -> None:
-    payload: dict[str, Any] = {
-        "task_id": request.task_id,
-        "callback_url": request.callback_url,
-        "experiment_id": request.experiment_id,
-        "run_id": request.run_id,
-        "data": base64.b64encode(compressed).decode(),
-        "attention_mask": request.attention_mask,  # None for ResNet/WikiText; forwarded as-is
+    headers: dict[str, str] = {
+        "x-task-id": request.task_id,
+        "x-callback-url": request.callback_url,
+        "x-experiment-id": request.experiment_id,
+        "x-run-id": request.run_id,
+        "content-type": "application/octet-stream",
     }
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.post(next_url, json=payload)
+    if request.attention_mask is not None:
+        headers["x-attention-mask"] = request.attention_mask
+    if request.input_ids is not None:
+        headers["x-input-ids"] = request.input_ids
+    if request.metric_type is not None:
+        headers["x-metric-type"] = request.metric_type
+    if request.answer_token_ids is not None:
+        headers["x-answer-token-ids"] = request.answer_token_ids
+    timeout = httpx.Timeout(connect=10.0, write=120.0, read=120.0, pool=10.0)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.post(next_url, content=compressed, headers=headers)
         resp.raise_for_status()
 
 
 async def _send_result(task_id: str, callback_url: str, result_bytes: bytes) -> None:
-    payload: dict[str, Any] = {
-        "task_id": task_id,
-        "data": base64.b64encode(result_bytes).decode(),
+    headers: dict[str, str] = {
+        "x-task-id": task_id,
+        "content-type": "application/octet-stream",
     }
-    # Large Llama logit tensors can take >30s to write; use a generous write timeout.
     timeout = httpx.Timeout(connect=10.0, write=120.0, read=30.0, pool=5.0)
     async with httpx.AsyncClient(timeout=timeout) as client:
-        resp = await client.post(callback_url, json=payload)
+        resp = await client.post(callback_url, content=result_bytes, headers=headers)
         resp.raise_for_status()
 
 

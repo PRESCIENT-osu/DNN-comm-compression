@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import logging
 import pickle
 import time
@@ -12,7 +11,7 @@ from contextlib import asynccontextmanager
 import httpx
 import torch
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from framework.datamodels.api import ResultPayload
@@ -187,7 +186,10 @@ class DataClient:
         client_ref = self
 
         @app.post("/result")
-        async def handle_result(payload: ResultPayload) -> JSONResponse:
+        async def handle_result(request: Request) -> JSONResponse:
+            task_id = request.headers.get("x-task-id", "")
+            data = await request.body()
+            payload = ResultPayload(task_id=task_id, data=data)
             future = client_ref._pending.get(payload.task_id)
             if future and not future.done():
                 future.set_result(payload)
@@ -253,27 +255,27 @@ async def _send_batch_to_node(
         experiment_id: Experiment name for metrics tagging.
         run_id: Run identifier for metrics tagging.
     """
-    raw = base64.b64encode(pickle.dumps(images)).decode()
-    payload = {
-        "task_id": task_id,
-        "callback_url": callback_url,
-        "experiment_id": experiment_id,
-        "run_id": run_id,
-        "data": raw,
+    data = pickle.dumps(images)
+    headers: dict[str, str] = {
+        "x-task-id": task_id,
+        "x-callback-url": callback_url,
+        "x-experiment-id": experiment_id,
+        "x-run-id": run_id,
+        "content-type": "application/octet-stream",
     }
     async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.post(first_node_url, json=payload)
+        resp = await client.post(first_node_url, content=data, headers=headers)
         resp.raise_for_status()
 
 
-def _decode_predictions(data: str) -> list[int]:
-    """Decode base64-pickled logits tensor to predicted class indices.
+def _decode_predictions(data: bytes) -> list[int]:
+    """Decode pickled logits tensor to predicted class indices.
 
     Args:
-        data: Base64-encoded pickled tensor from the last node.
+        data: Pickled tensor from the last node.
 
     Returns:
         List of predicted class indices (argmax of logits).
     """
-    tensor: torch.Tensor = pickle.loads(base64.b64decode(data))
+    tensor: torch.Tensor = pickle.loads(data)
     return tensor.argmax(dim=1).tolist()

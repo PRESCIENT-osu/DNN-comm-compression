@@ -173,7 +173,7 @@ sub_experiments:
   - name: csi_aware
     type: csi_aware
 
-  - name: no_csi_am_mlp
+  - name: no_csi_am_poly3
     type: no_csi
     mu_sweep: [4.0]
     accuracy_model_refs:

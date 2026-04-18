@@ -26,7 +26,7 @@ import httpx
 import torch
 import torch.nn.functional as F
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from transformers import AutoTokenizer
 
@@ -309,6 +309,12 @@ class LlamaDataClient:
                         callback_url=self.callback_url,
                         experiment_id=exp.name,
                         run_id=run_id,
+                        metric_type=metric_type,
+                        answer_token_ids=(
+                            ",".join(str(t) for t in self._answer_token_ids)
+                            if metric_type == "accuracy"
+                            else None
+                        ),
                     )
                     result_payload = await asyncio.wait_for(
                         future, timeout=self._result_timeout_s
@@ -406,7 +412,10 @@ class LlamaDataClient:
         client_ref = self
 
         @app.post("/result")
-        async def handle_result(payload: ResultPayload) -> JSONResponse:
+        async def handle_result(request: Request) -> JSONResponse:
+            task_id = request.headers.get("x-task-id", "")
+            data = await request.body()
+            payload = ResultPayload(task_id=task_id, data=data)
             future = client_ref._pending.get(payload.task_id)
             if future and not future.done():
                 future.set_result(payload)
@@ -456,7 +465,10 @@ async def _send_batch_to_node(
     callback_url: str,
     experiment_id: str,
     run_id: str,
+    pipeline_id: str = "",
     attention_mask: torch.Tensor | None = None,
+    metric_type: str | None = None,
+    answer_token_ids: str | None = None,
 ) -> None:
     """Pickle and POST a tokenized batch to the first pipeline node.
 
@@ -467,41 +479,53 @@ async def _send_batch_to_node(
         callback_url: URL the last node should POST results to.
         experiment_id: Experiment name for metrics tagging.
         run_id: Run identifier for metrics tagging.
+        pipeline_id: Pipeline identifier for multi-model nodes.
         attention_mask: Optional padding mask [B, L]; present only for MMLU
             batches with batch_size > 1.
+        metric_type: ``"perplexity"`` or ``"accuracy"`` — tells the last node
+            to compute the metric on-node instead of returning the full logit tensor.
+        answer_token_ids: Comma-separated token IDs for MMLU answer choices.
     """
-    raw = base64.b64encode(pickle.dumps(input_ids)).decode()
-    payload: dict[str, str | None] = {
-        "task_id": task_id,
-        "callback_url": callback_url,
-        "experiment_id": experiment_id,
-        "run_id": run_id,
-        "data": raw,
-        "attention_mask": (
-            base64.b64encode(pickle.dumps(attention_mask.bool())).decode()
-            if attention_mask is not None
-            else None
-        ),
+    data = pickle.dumps(input_ids)
+    headers: dict[str, str] = {
+        "x-task-id": task_id,
+        "x-pipeline-id": pipeline_id,
+        "x-callback-url": callback_url,
+        "x-experiment-id": experiment_id,
+        "x-run-id": run_id,
+        "content-type": "application/octet-stream",
+        "x-input-ids": base64.b64encode(pickle.dumps(input_ids)).decode(),
     }
+    if attention_mask is not None:
+        headers["x-attention-mask"] = base64.b64encode(
+            pickle.dumps(attention_mask.bool())
+        ).decode()
+    if metric_type is not None:
+        headers["x-metric-type"] = metric_type
+    if answer_token_ids is not None:
+        headers["x-answer-token-ids"] = answer_token_ids
     async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.post(first_node_url, json=payload)
+        resp = await client.post(first_node_url, content=data, headers=headers)
         resp.raise_for_status()
 
 
-def _decode_wikitext_result(data: str, input_ids: torch.Tensor) -> tuple[float, int]:
-    """Decode returned logits and compute NLL for WikiText perplexity.
+def _decode_wikitext_result(data: bytes, input_ids: torch.Tensor) -> tuple[float, int]:
+    """Decode WikiText result — either pre-computed (nll, count) tuple or raw logits.
 
     Args:
-        data: Base64-encoded pickled logit tensor [B, L, V] from the last node.
-        input_ids: Original input token IDs [B, L] sent to the first node.
+        data: Pickled result from the last node. Either a ``(nll_sum, token_count)``
+            tuple (on-node computation) or a logit tensor ``[B, L, V]`` (legacy).
+        input_ids: Original input token IDs ``[B, L]``.
 
     Returns:
         Tuple of (sum of NLL over all tokens in this batch, token count).
     """
-    logits: torch.Tensor = pickle.loads(base64.b64decode(data))
-    # Predict token i+1 from position i
-    shift_logits = logits[:, :-1, :].contiguous()  # [B, L-1, V]
-    shift_labels = input_ids[:, 1:].contiguous().long()  # [B, L-1]
+    result = pickle.loads(data)
+    if isinstance(result, tuple):
+        return result
+    logits: torch.Tensor = result
+    shift_logits = logits[:, :-1, :].contiguous()
+    shift_labels = input_ids[:, 1:].contiguous().long()
     B, L_minus_1, V = shift_logits.shape
     nll = F.cross_entropy(
         shift_logits.view(-1, V),
@@ -511,17 +535,22 @@ def _decode_wikitext_result(data: str, input_ids: torch.Tensor) -> tuple[float, 
     return nll, B * L_minus_1
 
 
-def _decode_mmlu_result(data: str, answer_token_ids: list[int]) -> list[int]:
-    """Decode returned logits and extract predicted answer (A/B/C/D) per sample.
+def _decode_mmlu_result(data: bytes, answer_token_ids: list[int]) -> list[int]:
+    """Decode MMLU result — either pre-computed answer indices or raw logits.
 
     Args:
-        data: Base64-encoded pickled logit tensor [B, L, V] from the last node.
-        answer_token_ids: Token IDs for ' A', ' B', ' C', ' D' in the Llama vocabulary.
+        data: Pickled result from the last node. Either a ``list[int]`` of
+            predicted answer indices (on-node computation) or a logit tensor
+            ``[B, L, V]`` (legacy).
+        answer_token_ids: Token IDs for ' A', ' B', ' C', ' D'.
 
     Returns:
         List of predicted answer indices (0=A, 1=B, 2=C, 3=D) per sample.
     """
-    logits: torch.Tensor = pickle.loads(base64.b64decode(data))
-    last_logits = logits[:, -1, :]  # [B, V]
-    cand_logits = last_logits[:, answer_token_ids]  # [B, 4]
+    result = pickle.loads(data)
+    if isinstance(result, list):
+        return result
+    logits: torch.Tensor = result
+    last_logits = logits[:, -1, :]
+    cand_logits = last_logits[:, answer_token_ids]
     return cand_logits.argmax(dim=-1).tolist()

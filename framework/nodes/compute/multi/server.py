@@ -41,6 +41,7 @@ from typing import Any
 
 import httpx
 import torch
+import torch.nn.functional as F
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -213,6 +214,25 @@ class MultiNodeState:
         self.idle_event.set()
         self._processing: bool = False
 
+        self._probe_clients: dict[str, httpx.AsyncClient] = {}
+
+    def probe_client(self, url: str) -> httpx.AsyncClient:
+        """Return a shared httpx client for link probes to the given destination."""
+        base = url.rsplit("/infer", 1)[0]
+        client = self._probe_clients.get(base)
+        if client is None:
+            client = httpx.AsyncClient(
+                timeout=30.0, limits=httpx.Limits(max_connections=2)
+            )
+            self._probe_clients[base] = client
+        return client
+
+    async def close_clients(self) -> None:
+        """Close all shared httpx clients."""
+        for client in self._probe_clients.values():
+            await client.aclose()
+        self._probe_clients.clear()
+
     def queue_by_pipeline(self) -> dict[str, int]:
         """Return a count of queued items per pipeline (excludes item being processed).
 
@@ -230,6 +250,43 @@ class MultiNodeState:
 # ---------------------------------------------------------------------------
 # App factory
 # ---------------------------------------------------------------------------
+
+
+async def _parse_infer_request(http_request: Request) -> MultiInferRequest:
+    """Parse an inference request from either binary or JSON format.
+
+    Binary format (preferred): raw bytes in body, metadata in HTTP headers.
+    JSON format (legacy): base64-encoded data in JSON body.
+    """
+    content_type = http_request.headers.get("content-type", "")
+    if "application/json" in content_type:
+        body = await http_request.json()
+        return MultiInferRequest(
+            task_id=body["task_id"],
+            pipeline_id=body["pipeline_id"],
+            callback_url=body["callback_url"],
+            experiment_id=body["experiment_id"],
+            run_id=body["run_id"],
+            data=base64.b64decode(body["data"]),
+            attention_mask=body.get("attention_mask"),
+            input_ids=body.get("input_ids"),
+            metric_type=body.get("metric_type"),
+            answer_token_ids=body.get("answer_token_ids"),
+        )
+    data = await http_request.body()
+    headers = http_request.headers
+    return MultiInferRequest(
+        task_id=headers["x-task-id"],
+        pipeline_id=headers["x-pipeline-id"],
+        callback_url=headers["x-callback-url"],
+        experiment_id=headers["x-experiment-id"],
+        run_id=headers["x-run-id"],
+        data=data,
+        attention_mask=headers.get("x-attention-mask"),
+        input_ids=headers.get("x-input-ids"),
+        metric_type=headers.get("x-metric-type"),
+        answer_token_ids=headers.get("x-answer-token-ids"),
+    )
 
 
 def build_app() -> FastAPI:
@@ -264,6 +321,7 @@ def build_app() -> FastAPI:
             list(state.pipelines.keys()),
         )
         yield
+        await state.close_clients()
         await state.emitter.stop()
 
     app = FastAPI(lifespan=lifespan)
@@ -273,10 +331,12 @@ def build_app() -> FastAPI:
     # -----------------------------------------------------------------------
 
     @app.post("/infer", status_code=202)
-    async def infer(request: MultiInferRequest) -> JSONResponse:
+    async def infer(http_request: Request) -> JSONResponse:
         """Accept an inference task and enqueue it for the worker."""
         state = _state[0]
         assert state is not None
+
+        request = await _parse_infer_request(http_request)
         if request.pipeline_id not in state.pipelines:
             raise HTTPException(
                 status_code=400,
@@ -564,7 +624,7 @@ async def _process_task(state: MultiNodeState, item: QueueItem) -> float:
     )
 
     try:
-        raw_bytes = base64.b64decode(request.data)
+        raw_bytes = request.data
 
         # Deserialize attention_mask if present (MMLU batches with batch_size > 1).
         attention_mask: torch.Tensor | None = None
@@ -623,21 +683,23 @@ async def _process_task(state: MultiNodeState, item: QueueItem) -> float:
             )
         )
 
-        # Last node: pickle result and post to callback.
+        # Last node: compute metric on-node if possible, then post result.
         if ps.is_last_node:
-            compress_start = compress_end = sent_time = time.time()
-            result_bytes = pickle.dumps(tensor.cpu())
-            await _send_result(request.task_id, request.callback_url, result_bytes)
-            sent_time = time.time()
-            _emit_timing(
-                state,
-                request,
-                item,
-                compute_start,
-                compute_end,
-                compress_start,
-                compress_end,
-                sent_time,
+            compress_start = compress_end = time.time()
+            result_bytes = _compute_result(tensor, request)
+            asyncio.create_task(
+                _result_and_emit(
+                    task_id=request.task_id,
+                    callback_url=request.callback_url,
+                    result_bytes=result_bytes,
+                    state=state,
+                    request=request,
+                    item=item,
+                    compute_start=compute_start,
+                    compute_end=compute_end,
+                    compress_start=compress_start,
+                    compress_end=compress_end,
+                )
             )
             return compute_seconds
 
@@ -804,8 +866,86 @@ async def _forward_and_emit(
         )
 
 
+async def _result_and_emit(
+    task_id: str,
+    callback_url: str,
+    result_bytes: bytes,
+    state: MultiNodeState,
+    request: MultiInferRequest,
+    item: QueueItem,
+    compute_start: float,
+    compute_end: float,
+    compress_start: float,
+    compress_end: float,
+) -> None:
+    """Send result to orchestrator and emit timing events in the background.
+
+    Mirrors ``_forward_and_emit`` but for the last node's result callback.
+    """
+    try:
+        await _send_result(task_id, callback_url, result_bytes)
+        sent_time = time.time()
+        _emit_timing(
+            state,
+            request,
+            item,
+            compute_start,
+            compute_end,
+            compress_start,
+            compress_end,
+            sent_time,
+        )
+    except Exception:
+        logger.exception(
+            "Failed to send result for task '%s' (pipeline '%s')",
+            request.task_id,
+            request.pipeline_id,
+        )
+
+
+def _compute_result(tensor: torch.Tensor, request: MultiInferRequest) -> bytes:
+    """Compute the final result at the last node.
+
+    For Llama WikiText/MMLU, computes the metric on-node to avoid
+    transferring the full logit tensor (can be 100+ MB).
+    """
+    if request.metric_type == "perplexity" and request.input_ids is not None:
+        input_ids = pickle.loads(base64.b64decode(request.input_ids))
+        return pickle.dumps(_compute_wikitext_nll(tensor, input_ids))
+    if request.metric_type == "accuracy" and request.answer_token_ids is not None:
+        ids = [int(x) for x in request.answer_token_ids.split(",")]
+        return pickle.dumps(_compute_mmlu_argmax(tensor, ids))
+    return pickle.dumps(tensor.cpu())
+
+
+def _compute_wikitext_nll(
+    logits: torch.Tensor, input_ids: torch.Tensor
+) -> tuple[float, int]:
+    """Compute NLL for WikiText perplexity from logits and input_ids."""
+    shift_logits = logits[:, :-1, :].contiguous().float()
+    shift_labels = input_ids[:, 1:].contiguous().long().to(logits.device)
+    B, L_minus_1, V = shift_logits.shape
+    nll = F.cross_entropy(
+        shift_logits.view(-1, V),
+        shift_labels.view(-1),
+        reduction="sum",
+    ).item()
+    return nll, B * L_minus_1
+
+
+def _compute_mmlu_argmax(
+    logits: torch.Tensor, answer_token_ids: list[int]
+) -> list[int]:
+    """Extract predicted answer indices (0=A, 1=B, 2=C, 3=D) from logits."""
+    last_logits = logits[:, -1, :]
+    cand_logits = last_logits[:, answer_token_ids]
+    return cand_logits.argmax(dim=-1).tolist()
+
+
 async def _forward_to_next(
-    next_url: str, request: MultiInferRequest, compressed: bytes
+    next_url: str,
+    request: MultiInferRequest,
+    compressed: bytes,
 ) -> None:
     """POST compressed activation to the next node in the pipeline.
 
@@ -814,21 +954,34 @@ async def _forward_to_next(
         request: Original inference request (task_id, callback_url, etc.).
         compressed: Compressed activation bytes.
     """
-    payload: dict[str, Any] = {
-        "task_id": request.task_id,
-        "pipeline_id": request.pipeline_id,
-        "callback_url": request.callback_url,
-        "experiment_id": request.experiment_id,
-        "run_id": request.run_id,
-        "data": base64.b64encode(compressed).decode(),
-        "attention_mask": request.attention_mask,  # None for ResNet/WikiText; forwarded as-is
+    headers: dict[str, str] = {
+        "x-task-id": request.task_id,
+        "x-pipeline-id": request.pipeline_id,
+        "x-callback-url": request.callback_url,
+        "x-experiment-id": request.experiment_id,
+        "x-run-id": request.run_id,
+        "content-type": "application/octet-stream",
     }
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.post(next_url, json=payload)
+    if request.attention_mask is not None:
+        headers["x-attention-mask"] = request.attention_mask
+    if request.input_ids is not None:
+        headers["x-input-ids"] = request.input_ids
+    if request.metric_type is not None:
+        headers["x-metric-type"] = request.metric_type
+    if request.answer_token_ids is not None:
+        headers["x-answer-token-ids"] = request.answer_token_ids
+    async with httpx.AsyncClient(
+        timeout=httpx.Timeout(connect=10.0, write=120.0, read=120.0, pool=10.0),
+    ) as client:
+        resp = await client.post(next_url, content=compressed, headers=headers)
         resp.raise_for_status()
 
 
-async def _send_result(task_id: str, callback_url: str, result_bytes: bytes) -> None:
+async def _send_result(
+    task_id: str,
+    callback_url: str,
+    result_bytes: bytes,
+) -> None:
     """POST the final inference result to the orchestrator callback.
 
     Args:
@@ -836,14 +989,13 @@ async def _send_result(task_id: str, callback_url: str, result_bytes: bytes) -> 
         callback_url: Orchestrator callback URL.
         result_bytes: Pickled output tensor bytes.
     """
-    payload: dict[str, Any] = {
-        "task_id": task_id,
-        "data": base64.b64encode(result_bytes).decode(),
+    headers = {
+        "x-task-id": task_id,
+        "content-type": "application/octet-stream",
     }
-    # Large Llama logit tensors can take >30s to write; use a generous write timeout.
-    timeout = httpx.Timeout(connect=10.0, write=120.0, read=30.0, pool=5.0)
+    timeout = httpx.Timeout(connect=10.0, write=120.0, read=30.0, pool=10.0)
     async with httpx.AsyncClient(timeout=timeout) as client:
-        resp = await client.post(callback_url, json=payload)
+        resp = await client.post(callback_url, content=result_bytes, headers=headers)
         resp.raise_for_status()
 
 
@@ -865,6 +1017,7 @@ async def _probe_loop(
         next_node_name: Downstream node name for metric tagging.
     """
     probe_base_url = next_node_url.rsplit("/infer", 1)[0]
+    probe_client = state.probe_client(next_node_url)
     while True:
         await state.idle_event.wait()
         await asyncio.sleep(0.5)
@@ -872,14 +1025,12 @@ async def _probe_loop(
             continue
         try:
             t0 = time.perf_counter()
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                await client.get(f"{probe_base_url}/probe")
+            await probe_client.get(f"{probe_base_url}/probe")
             rtt_ms = (time.perf_counter() - t0) * 1000
 
             payload = bytes(_PROBE_PAYLOAD_BYTES)
             t0 = time.perf_counter()
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                await client.post(f"{probe_base_url}/probe", content=payload)
+            await probe_client.post(f"{probe_base_url}/probe", content=payload)
             elapsed_s = time.perf_counter() - t0
             throughput_mbps = (_PROBE_PAYLOAD_BYTES * 8) / (elapsed_s * 1e6)
 
