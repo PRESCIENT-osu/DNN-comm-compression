@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import pickle
 from abc import ABC, abstractmethod
 from typing import Any
@@ -8,6 +9,8 @@ import numpy as np
 import torch
 
 from framework.datamodels.experiment import CompressionMethod
+
+logger = logging.getLogger(__name__)
 
 
 class Compressor(ABC):
@@ -478,8 +481,36 @@ class LLMInt8(Compressor):
         shape = tensor.shape
         numel = tensor.numel()
 
-        threshold = torch.quantile(tensor.abs().reshape(-1), float(1.0 - rate)).item()
+        nonfinite_mask = ~torch.isfinite(tensor)
+        n_nonfinite = nonfinite_mask.sum().item()
+        if n_nonfinite > 0:
+            logger.warning(
+                "LLMInt8: %d/%d non-finite values in tensor; "
+                "filtering before quantile and including as outliers",
+                n_nonfinite,
+                numel,
+            )
+
+        abs_flat = tensor.abs().reshape(-1)
+        if n_nonfinite > 0:
+            finite_abs = abs_flat[torch.isfinite(abs_flat)]
+            n_finite = finite_abs.numel()
+            nonfinite_frac = n_nonfinite / numel
+            if n_finite == 0 or rate <= nonfinite_frac:
+                threshold = float("inf")
+            else:
+                n_extra = int(rate * numel) - n_nonfinite
+                adjusted_rate = min(n_extra / n_finite, 1.0)
+                threshold = torch.quantile(
+                    finite_abs, float(1.0 - adjusted_rate)
+                ).item()
+        else:
+            threshold = torch.quantile(abs_flat, float(1.0 - rate)).item()
         mask_bool = tensor.abs() > threshold
+        if n_nonfinite > 0:
+            mask_bool = mask_bool | nonfinite_mask
+            tensor = tensor.clone()
+            tensor.clamp_(-65504.0, 65504.0)
 
         outlier_raw = torch.masked_select(tensor, mask_bool)
         outlier_scale: float | None = None
