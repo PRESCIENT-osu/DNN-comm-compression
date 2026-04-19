@@ -72,7 +72,7 @@ optimization_loop:
   batches_per_slot: 5
   profiling_batches: 4
   link_probe_interval_slots: 4
-  epsilon: 0.01
+  epsilon: 0.1
 
 metrics_server:
   host: metrics
