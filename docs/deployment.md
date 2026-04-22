@@ -56,33 +56,70 @@ The metrics and orchestrator images do not include `entrypoint.sh` — they are 
 
 ## Generating Manifests
 
-Generate the experiment directory first using `tools/generate.py` (see [docs/config.md](config.md#generating-experiments)), then deploy it:
-
-```bash
-# 1. Generate the experiment
-python tools/generate.py \
-    --spec specs/resnet56/equal-split \
-    --profile profiles/linear-3/100mbps.yaml
-
-# 2. Deploy the generated experiment
-python -m framework.deploy \
-  --experiment experiments/resnet56_equal-split_linear-3_100mbps \
-  --target docker|k8s \
-  --partitions-dir models/resnet/.partitions \
-  --dataset-dir .datasets/cifar10 \
-  [--image dnn-compute-resnet:latest] \
-  [--metrics-dir metrics_data] \
-  [--namespace default] \
-  [--apply]
-```
-
-`--dataset-dir` is the host path to the dataset directory. It is mounted into the orchestrator container at the path configured in `exp.dataset.path`.
+Generate the experiment directory first using `tools/generate.py` (see [docs/config.md](config.md#generating-experiments)), then deploy it.
 
 Manifests are written to `experiments/<name>/deploy/`:
 - Docker: `docker-compose.yml`
 - k8s: `manifests.yaml`
 
 Without `--apply`, manifests are written for inspection only. With `--apply`, the tool runs `docker compose up -d` or `kubectl apply -f`.
+
+### Single-model experiment
+
+```bash
+python tools/generate.py \
+    --spec specs/resnet56/equal-split \
+    --profile profiles/linear-3/100mbps.yaml
+
+python -m framework.deploy \
+  --experiment experiments/resnet56_equal-split_linear-3_100mbps \
+  --target docker \
+  --image dnn-compute-resnet:latest \
+  --partitions-dir models/resnet/.partitions \
+  --dataset-dir .datasets/cifar10 \
+  [--metrics-dir metrics_data] \
+  [--namespace default] \
+  [--apply]
+```
+
+### Multi-model experiment
+
+```bash
+python tools/generate.py --multi \
+    --spec multispecs/resnet56_llama_mmlu \
+    --profile profiles/linear-3-multi/100mbps.yaml
+
+python -m framework.deploy --multi \
+  --experiment experiments/multi/resnet56_llama_mmlu_linear-3-multi_100mbps \
+  --target docker \
+  --image dnn-compute-multi:latest \
+  --partitions-dir models \
+  --dataset-dir .datasets \
+  [--metrics-dir metrics_data] \
+  [--apply]
+```
+
+`--partitions-dir` for multi-model is the base directory containing per-model subdirectories (e.g. `models/resnet/.partitions/` and `models/llama/.partitions/` under `models/`). `--dataset-dir` is the base `.datasets/` directory containing all dataset subdirectories.
+
+### Optimizer experiment
+
+```bash
+python tools/generate.py --opt \
+    --spec optspecs/resnet56_llama_mmlu \
+    --profile profiles/linear-3-multi/100mbps.yaml
+
+python -m framework.deploy --opt \
+  --experiment experiments/opt/resnet56_llama_mmlu_linear-3-multi_100mbps \
+  --target docker \
+  --image dnn-compute-multi:latest \
+  --partitions-dir models \
+  --dataset-dir .datasets \
+  [--artifacts-dir artifacts] \
+  [--metrics-dir metrics_data] \
+  [--apply]
+```
+
+`--artifacts-dir` is the host path for optimizer artifact storage (profiling results, estimator state, accuracy models). Defaults to `artifacts/`.
 
 ## Docker Compose
 

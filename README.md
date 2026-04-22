@@ -2,6 +2,8 @@
 
 A research framework for distributed DNN inference with communication compression. Models are partitioned into sequential pipeline stages deployed across multiple nodes (containers). Intermediate activations transmitted between nodes are optionally compressed to reduce communication overhead. The framework supports sweeping over compression methods and rates, collecting metrics, and comparing results against baselines.
 
+![Framework Overview](diagrams/framework.png)
+
 ## Documentation
 
 - [Configuration](docs/config.md) — experiment and infrastructure config schemas
@@ -19,98 +21,40 @@ A research framework for distributed DNN inference with communication compressio
 - [ResNet-56](docs/resnet.md) — partitioning, experiment configs, running on Docker and Kubernetes
 - [Llama-3.1-8B](docs/llama.md) — partitioning, experiment configs, running Llama experiments
 
-## Project Structure
+## Repository Layout
 
-```
-framework/
-├── validate.py                     # python -m framework.validate
-├── datamodels/                     # all Pydantic schemas and data containers
-│   ├── experiment.py               # ExperimentConfig, NodeConfig, SweepEntry, …
-│   ├── infra.py                    # InfraConfig, InfraNodeConfig, …
-│   ├── spec.py                     # GeneratedExperimentConfig, ResolvedSubExperiment
-│   ├── multi_experiment.py         # MultiExperimentConfig, PipelineConfig, WorkloadConfig, …
-│   ├── opt_experiment.py           # OptExperimentConfig and all sub-experiment types
-│   ├── events.py                   # BaseEvent and all metric event types
-│   ├── api.py                      # InferRequest, ConfigUpdate, ResultPayload
-│   └── results.py                  # RunRecord, LlamaRunRecord
-├── utils/
-│   └── loader.py                   # load_experiment_dir, load_infra_config, …
-├── nodes/
-│   ├── compute/
-│   │   ├── common/
-│   │   │   ├── server.py           # build_app() factory shared by all compute nodes
-│   │   │   └── compressor.py       # compression logic
-│   │   ├── resnet/server.py        # ResNet compute node (torch.jit.load)
-│   │   ├── llama/server.py         # Llama compute node (torch.load)
-│   │   └── multi/server.py         # Multi-pipeline node (FIFO queue, per-pipeline state)
-│   ├── metrics/
-│   │   ├── server.py               # metrics ingestion server
-│   │   └── emitter.py              # async MetricsEmitter
-│   └── orchestrator/
-│       ├── runner.py               # single-model sweep loop and CLI entry point
-│       ├── controller.py           # config push and drain helpers
-│       ├── data_client.py          # callback server + batch sending (image models)
-│       ├── llama_data_client.py    # data client for Llama
-│       ├── datasets.py             # image dataset loaders
-│       ├── multi_controller.py     # per-pipeline config push; multi-node health/idle polling
-│       ├── multi_runner.py         # multi-model sweep loop, workload submission
-│       └── opt_runner.py           # optimizer experiment runner (slot loop, adapter interface)
-├── optimizer/
-│   ├── inference_optimizer_adapter.py  # adapter: framework configs → external optimizer
-│   ├── channel_estimators.py       # moving average, LCB, last-observation estimators
-│   ├── accuracy_model.py           # surrogate accuracy model training + querying
-│   ├── evaluators.py               # profiling and accuracy sweep evaluators
-│   └── compression_mapper.py       # η → (method, rate) conversion
-├── deploy/
-│   ├── __main__.py                 # python -m framework.deploy
-│   ├── docker_backend.py
-│   └── k8s_backend.py
-└── analysis/
-    ├── analyze.py
-    └── visualize.py
+| Directory / File | Role |
+|-----------------|------|
+| `specs/` | Single-model experiment specs — model, partitioning, compression variants (what runs) |
+| `multispecs/` | Multi-model experiment specs — multiple pipelines sharing nodes |
+| `optspecs/` | Optimizer experiment specs — adaptive compression sub-experiments |
+| `profiles/` | Infrastructure definitions — node addresses, resource limits, link shaping (where it runs) |
+| `experiments/` | Generated output — gitignored; produced by `tools/generate.py` |
+| `tools/generate.py` | Composes a spec + profile into a runnable experiment directory |
+| `framework/` | All framework Python code (nodes, orchestrators, deploy, analysis, optimizer) |
+| `models/` | Offline partitioning scripts and partition artifacts |
+| `docker/` | Dockerfiles for each container role |
+| `docs/` | Component reference documentation |
 
-tools/
-└── generate.py                     # experiment generation tool
+## Generated Artifacts
 
-specs/                              # single-model experiment specs (what)
-├── resnet56/
-│   ├── experiment.yaml             # model-level defaults
-│   ├── sub_experiments.yaml        # compression sub-experiments
-│   ├── equal-split/
-│   ├── single-node/
-│   └── ...
-└── llama/
-    └── ...
+All paths are relative to the repo root. All are gitignored unless noted.
 
-multispecs/                         # multi-model experiment specs (what)
-└── resnet56_llama_mmlu/
-    ├── experiment.yaml             # nodes, pipelines, datasets, workload
-    └── sub_experiments.yaml        # per-pipeline compression sweep definitions
+| Path | Written by | Contents |
+|------|-----------|----------|
+| `experiments/{name}/` | `tools/generate.py` | `experiment.yaml` (merged spec) and `infra.yaml` (profile copy) |
+| `experiments/multi/{name}/` | `tools/generate.py --multi` | Same structure for multi-model experiments |
+| `experiments/opt/{name}/` | `tools/generate.py --opt` | Same structure for optimizer experiments |
+| `experiments/{name}/deploy/` | `framework.deploy` | `docker-compose.yml` or `manifests.yaml` |
+| `experiments/{name}/plots/` | `framework.analysis.visualize` | PNG plots (accuracy, latency, pareto, etc.) |
+| `metrics_data/{name}/*.ndjson` | Metrics server (during run) | One NDJSON file per event type: `result.ndjson`, `forward_pass.ndjson`, `compress.ndjson`, `decompress.ndjson`, `send.ndjson`, `link_probe.ndjson`, `opt_slot.ndjson`, `queue_snapshot.ndjson`, etc. |
+| `artifacts/{name}/profiling/` | `opt_runner` | Per-method profiling results: `profiling_{method}.json` |
+| `artifacts/shared/accuracy_models/` | `opt_runner` | Trained surrogate accuracy model files (`.json` + `.pkl`), keyed by model/topology/method/dataset |
+| `results/{name}/tables/` | `framework.analysis.analyze` | `sub_exp_table.csv`, `modified_sub_exp_table.csv` |
+| `figs/` | `framework.analysis.topology` | Topology diagram PNGs |
+| `models/{model}/.partitions/` | `models/{model}/partition_*.py` | Model partition `.pt` files — produced once offline, consumed by compute nodes |
 
-optspecs/                           # optimizer experiment specs (what)
-└── resnet56_llama_mmlu/
-    ├── experiment.yaml             # pipelines, links with eta_min, simulation config
-    └── sub_experiments.yaml        # optimizer sub-experiment types (no_csi, csi_aware, baselines)
-
-profiles/                           # infrastructure definitions (where)
-├── single-node/
-│   └── default.yaml
-├── linear-3/
-│   ├── default.yaml                # 1 Gbps, no constraints
-│   ├── 100mbps.yaml
-│   └── wan.yaml                    # WAN with delay/jitter/loss
-└── linear-3-multi/
-    ├── docker.yaml
-    └── 100mbps.yaml
-
-experiments/                        # generated output — gitignored
-docker/
-├── Dockerfile.compute-resnet       # CUDA + PyTorch, torchvision
-├── Dockerfile.compute-llama        # CUDA + PyTorch, transformers
-├── Dockerfile.compute-multi        # CUDA + PyTorch, torchvision + transformers (multi-pipeline)
-├── Dockerfile.metrics              # python:slim, fastapi only
-└── Dockerfile.orchestrator         # CUDA + PyTorch (Stein oracle needs GPU), transformers
-```
+> **Note:** `metrics_data/` files are appended to on each run. Run `python -m framework.analysis.cleanup --experiment <name>` before re-running an experiment to avoid blending results from multiple runs.
 
 ## Setup
 
@@ -126,7 +70,7 @@ Or use the Makefile:
 make install-dev
 ```
 
-## Code Style
+## Code Formatting
 
 ```bash
 make lint        # check for linting issues
@@ -193,14 +137,41 @@ Validation checks both configs, resolves infra inheritance, expands the sweep, v
 python -m framework.deploy \
   --experiment experiments/resnet56_equal-split_linear-3_100mbps \
   --target docker \
+  --image dnn-compute-resnet:latest \
   --partitions-dir models/resnet/.partitions \
   --dataset-dir .datasets/cifar10 \
   --apply
 ```
 
-See the model-specific guides for full step-by-step instructions:
+The orchestrator runs as a container inside the compose/k8s cluster and exits when the sweep completes. See [docs/deployment.md](docs/deployment.md) for multi-model and optimizer deploy examples, and the model-specific guides for full step-by-step instructions:
 - [ResNet-56 on Docker / Kubernetes](docs/resnet.md)
 - [Llama-3.1-8B](docs/llama.md)
+
+## Multi-Model Experiments
+
+Multi-model experiments co-locate multiple pipelines on shared nodes with a FIFO inference queue. Each node runs the multi-pipeline server; compression is configured independently per (pipeline, link) pair.
+
+Multi-model specs live in `multispecs/` and are generated with the `--multi` flag:
+
+```bash
+python tools/generate.py --multi \
+    --spec multispecs/resnet56_llama_mmlu \
+    --profile profiles/linear-3-multi/100mbps.yaml
+```
+
+This produces `experiments/multi/resnet56_llama_mmlu_linear-3-multi_100mbps/`. Deploy and run:
+
+```bash
+python -m framework.deploy --multi \
+  --experiment experiments/multi/resnet56_llama_mmlu_linear-3-multi_100mbps \
+  --target docker \
+  --image dnn-compute-multi:latest \
+  --partitions-dir models \
+  --dataset-dir .datasets \
+  --apply
+```
+
+See [docs/multi_task.md](docs/multi_task.md) for the complete reference.
 
 ## Optimizer Experiments
 
@@ -214,13 +185,16 @@ python tools/generate.py --opt \
     --profile profiles/linear-3-multi/100mbps.yaml
 ```
 
-This produces `experiments/opt/resnet56_llama_mmlu_linear-3-multi_100mbps/`. Run the optimizer loop:
+This produces `experiments/opt/resnet56_llama_mmlu_linear-3-multi_100mbps/`. Deploy and run:
 
 ```bash
-python -m framework.nodes.orchestrator.opt_runner \
-    experiments/opt/resnet56_llama_mmlu_linear-3-multi_100mbps \
-    --callback-host orchestrator \
-    --callback-port 8080
+python -m framework.deploy --opt \
+  --experiment experiments/opt/resnet56_llama_mmlu_linear-3-multi_100mbps \
+  --target docker \
+  --image dnn-compute-multi:latest \
+  --partitions-dir models \
+  --dataset-dir .datasets \
+  --apply
 ```
 
 Sub-experiment types include `no_csi` (Lyapunov-based, channel-free), `csi_aware` (closed-form η* with LCB), and a full set of single- and multi-task baselines. See [docs/optimizer.md](docs/optimizer.md) for the complete reference.
@@ -235,3 +209,9 @@ python -m framework.analysis.visualize --experiment resnet56_equal-split_linear-
 ## Model Partitioning
 
 Partitioning scripts are in `models/` and are independent of the experiment framework. Run them once to produce partition artifacts consumed by node servers. More info in the model-specific instructions mentioned above.
+
+## Deployment on PRESCIENT
+
+Experiments are designed to run on the PRESCIENT network research testbed at the Ohio State University. PRESCIENT provides programmable wide-area network conditions (configurable bandwidth, delay, and loss across inter-node links), making it well-suited for evaluating the accuracy-vs-compression tradeoff under realistic communication constraints.
+
+![Deployment Architecture](diagrams/deployment_architecture.png)

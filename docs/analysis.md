@@ -93,43 +93,28 @@ python -m framework.analysis.cleanup --experiment resnet56_topk_sweep
 ## Typical Workflow
 
 ```bash
-# 1. Deploy and run baselines
-python -m framework.deploy.deploy \
-  --experiment experiments/resnet56_single_node_baseline \
+# 1. Generate the experiment (baselines are materialised automatically)
+python tools/generate.py \
+    --spec specs/resnet56/equal-split \
+    --profile profiles/linear-3/100mbps.yaml
+
+# 2. Deploy and run
+python -m framework.deploy \
+  --experiment experiments/resnet56_equal-split_linear-3_100mbps \
   --target docker \
   --partitions-dir models/resnet/.partitions \
   --dataset-dir .datasets/cifar10 \
   --apply
 
 # Wait for orchestrator to finish, then tear down
-docker compose -f experiments/resnet56_single_node_baseline/deploy/docker-compose.yml down
-
-# Repeat for the distributed baseline
-python -m framework.deploy.deploy \
-  --experiment experiments/resnet56_distributed_baseline \
-  --target docker \
-  --partitions-dir models/resnet/.partitions \
-  --dataset-dir .datasets/cifar10 \
-  --apply
-
-docker compose -f experiments/resnet56_distributed_baseline/deploy/docker-compose.yml down
-
-# 2. Run the sweep experiment
-python -m framework.deploy.deploy \
-  --experiment experiments/resnet56_topk_sweep \
-  --target docker \
-  --partitions-dir models/resnet/.partitions \
-  --dataset-dir .datasets/cifar10 \
-  --apply
-
-docker compose -f experiments/resnet56_topk_sweep/deploy/docker-compose.yml down
+docker compose -f experiments/resnet56_equal-split_linear-3_100mbps/deploy/docker-compose.yml down
 
 # 3. Analyse results
-python -m framework.analysis.analyze --experiment resnet56_topk_sweep
-python -m framework.analysis.visualize --experiment resnet56_topk_sweep
+python -m framework.analysis.analyze --experiment resnet56_equal-split_linear-3_100mbps
+python -m framework.analysis.visualize --experiment resnet56_equal-split_linear-3_100mbps
 
 # 4. (Optional) Visualise the infrastructure topology
 python -m framework.analysis.topology \
-  --infra experiments/resnet56_topk_sweep/infra.yaml \
-  --output experiments/resnet56_topk_sweep/topology.png
+  --infra experiments/resnet56_equal-split_linear-3_100mbps/infra.yaml \
+  --output experiments/resnet56_equal-split_linear-3_100mbps/topology.png
 ```
