@@ -915,6 +915,7 @@ def _materialise_opt(
         "nodes": nodes,
         "pipelines": spec["pipelines"],
         "datasets": spec["datasets"],
+        "stein_datasets": spec.get("stein_datasets"),
         "workload": spec["workload"],
         "tasks": spec["tasks"],
         "links": spec["links"],

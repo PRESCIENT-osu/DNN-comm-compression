@@ -1,0 +1,29 @@
+nodes:
+  - name: A
+    host: opt-a
+    port: 8000
+    resources:
+      gpu: 1
+  - name: B
+    host: opt-b
+    port: 8000
+    resources:
+      gpu: 1
+  - name: C
+    host: opt-c
+    port: 8000
+    resources:
+      gpu: 1
+links:
+  - from: A
+    to: B
+    bandwidth_mbps: 50
+    delay_ms: 20
+    jitter_ms: 10
+    loss_pct: 1.0
+  - from: B
+    to: C
+    bandwidth_mbps: 75
+    delay_ms: 10
+    jitter_ms: 5
+    loss_pct: 0.5
