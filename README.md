@@ -5,7 +5,7 @@ This is an evaluation framework developed on the OSU PRESCIENT testbed, accompan
 **Communication-Aware Model Distributed Inference via Latent Representation Compression
 (MobiHoc 2026)**
 
-The compression optimizer code (dependency) is available [here](https://github.com/Peyman-gholami/Inference_Optimizer/tree/public-release).
+The compression optimizer code (dependency) is available [here](https://github.com/neu-spiral/communication-aware-inference).
  
 A research framework for distributed DNN inference with communication compression. Models are partitioned into sequential pipeline stages deployed across multiple nodes (containers). Intermediate activations transmitted between nodes are optionally compressed to reduce communication overhead. The framework supports sweeping over compression methods and rates, collecting metrics, and comparing results against baselines.
 
@@ -222,3 +222,11 @@ Partitioning scripts are in `models/` and are independent of the experiment fram
 Experiments are designed to run on the PRESCIENT network research testbed at the Ohio State University. PRESCIENT provides programmable wide-area network conditions (configurable bandwidth, delay, and loss across inter-node links), making it well-suited for evaluating the accuracy-vs-compression tradeoff under realistic communication constraints.
 
 ![Deployment Architecture](diagrams/deployment_architecture.png)
+
+## Acknowledgments
+
+This work was supported by the National Science Foundation
+through the AI-EDGE Institute (Award No. 2112471) and by the
+State of Ohio through the Central Ohio Broadband and 5G Super 
+RAPIDS grant (OHSU02) for funding the PRESCIENT testbed. 
+
