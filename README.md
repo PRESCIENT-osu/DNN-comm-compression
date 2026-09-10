@@ -1,5 +1,12 @@
 # DNN-comm-compression
 
+This is an evaluation framework developed on the OSU PRESCIENT testbed, accompanying the work:
+
+**Communication-Aware Model Distributed Inference via Latent Representation Compression
+(MobiHoc 2026)**
+
+The compression optimizer code (dependency) is available [here](https://github.com/Peyman-gholami/Inference_Optimizer/tree/public-release).
+ 
 A research framework for distributed DNN inference with communication compression. Models are partitioned into sequential pipeline stages deployed across multiple nodes (containers). Intermediate activations transmitted between nodes are optionally compressed to reduce communication overhead. The framework supports sweeping over compression methods and rates, collecting metrics, and comparing results against baselines.
 
 ![Framework Overview](diagrams/framework.png)
