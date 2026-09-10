@@ -10,11 +10,13 @@ Optimization experiments are a distinct mode of operation that sits on top of th
 
 Time is divided into fixed-length slots. During each slot, the orchestrator:
 
-1. Probes link capacities (throughput measurements).
-2. Calls the optimizer to select η per pipeline per link.
-3. Pushes the resulting compression config to all nodes.
-4. Submits `batches_per_slot` inference batches and collects results.
-5. Updates optimizer state (dual variables, channel estimators).
+1. Probes link capacities (throughput measurements) — on probe slots only, every `link_probe_interval_slots` (CSI-aware adapters probe every slot).
+2. Calls the optimizer to select η per pipeline per link, using the channel estimate `ĉ(t)` built from **previous** slots' probes.
+3. Pushes the resulting compression config and WFQ compute-share weights to all nodes.
+4. Submits `batches_per_slot` inference batches and collects results (realized delay and throughput).
+5. Folds this slot's probe into the channel estimator (for future slots) and updates the dual variables λ_k from the **realized** delay.
+
+The estimator is updated with the current probe in step 5, **after** the optimizer step in step 2 — so `ĉ(t)` depends only on slots `< t` and is `F(t)`-measurable. This causal ordering is required by the no-CSI / estimated-CSI algorithms (the paper's Algorithm 1 obtains `ĉ(t)` before the execute step) and is the precondition for Assumption 3; see [Channel Estimation](#channel-estimation).
 
 The number of slots and batches per slot are set in the `optimization_loop` section of the optspec.
 
@@ -48,7 +50,7 @@ For baseline sub-experiments whose optimizers do not call A_k (CSI-aware baselin
 
 ### Channel Estimation
 
-No-CSI optimizers and estimated-CSI baselines maintain a per-link channel capacity estimator that is updated with measured throughput after each slot probe. Available estimators:
+No-CSI optimizers and estimated-CSI baselines do **not** use the instantaneous channel state. Instead they maintain a per-link capacity estimator that produces `ĉ(t)` from the history of *previous* slots' probes, decide η against `ĉ(t)`, and only then observe the realized delay — matching the paper's Estimated-CSI / CSI-Oblivious setting. (CSI-aware, by contrast, uses the current probe directly.) Available estimators:
 
 | Type | Description |
 |------|-------------|
@@ -56,7 +58,14 @@ No-CSI optimizers and estimated-CSI baselines maintain a per-link channel capaci
 | `mean` | Running mean over all observations |
 | `running_min` | Running minimum over all observations |
 | `moving_average` | Mean over a sliding window |
-| `lcb` | Mean − z·σ lower confidence bound |
+| `lcb` | Mean − z·σ lower confidence bound (conservative underestimate) |
+
+**Causality (Assumption 3).** The estimator is updated with a probe only *after* the optimizer step that slot (see [Slots](#slots)), so `ĉ(t)` is a function of slots `< t` (`F(t)`-measurable). This is what makes the paper's Assumption 3 well-posed: the estimation error `Δ_k(t) = D_act,k(t) − D̂_k(t)` is conditioned on the past. The predicted delay `D̂_k(t)` is emitted as `opt_slot.d_hat_per_task` and the estimate-vs-realization gap as `channel_estimate_quality`, so `δ` and `δ⁺` can be measured offline — see [assumption3_validation.md](assumption3_validation.md).
+
+### Known Limitations
+
+- **Starved tasks are dropped from the dual update and the Δ measurement.** In the slot loop, `actual_delays` is populated only when `achieved_rps > 0`; a task that receives zero throughput contributes no realized delay, so its (effectively infinite) delay never reaches the dual variable λ_k or the emitted metrics. An empirical `δ⁺` computed from surviving slots is therefore biased low — coverage must be reported alongside it (see [assumption3_validation.md](assumption3_validation.md)). How a starved task's delay should enter the dual is an open question.
+- **`s_comm` is computed but not actuated.** The optimizer allocates per-pipeline link-bandwidth shares `s_comm`, but the HTTP transport has no per-pipeline egress shaping, so only `s_comp` (WFQ compute shares) is pushed. Pipelines contend for link bandwidth naturally rather than by the optimizer's `s_comm`.
 
 ---
 
@@ -579,7 +588,7 @@ If a profiling artifact already exists at `{artifacts_dir}/profiling/{name}.json
 
 ## Metrics Emitted
 
-The opt_runner emits standard multi-model events plus three optimization-specific event types:
+The opt_runner emits standard multi-model events plus four optimization-specific event types:
 
 ### `opt_slot`
 
@@ -589,8 +598,10 @@ Emitted once per optimization slot.
 |-------|-------------|
 | `slot_id` | Slot index |
 | `eta_per_pipeline_per_link` | η selected by the optimizer for each pipeline on each link |
-| `d_excess_per_task` | Per-pipeline throughput shortfall (max(0, R_k − achieved_rps)) |
-| `c_hat_per_link` | Channel capacity estimate used at decision time |
+| `d_excess_per_task` | Per-pipeline delay excess over target, max(0, 1/achieved_rps − 1/R_k) in seconds |
+| `throughput_shortfall_per_pipeline` | Per-pipeline throughput deficit, max(0, R_k − achieved_rps) in tasks/second |
+| `c_hat_per_link` | Realized capacity probed this slot (bps). The estimate the optimizer used is in `channel_estimate_quality.c_hat_bps` |
+| `d_hat_per_task` | Predicted bottleneck delay D̂_k (seconds) at decision time; pair with realized 1/achieved_rps for Δ_k = D_act − D̂_k (Assumption 3) |
 | `optimizer_type` | Sub-experiment name (e.g. `no_csi_mu_sweep_mu1.0`) |
 | `solve_time_ms` | Time taken to call the optimizer |
 | `infeasible` | True when the optimizer declared infeasibility and η_max fallback was used |
@@ -621,6 +632,21 @@ Emitted once per pipeline per slot during optimization, and once per simulation 
 | `eta_per_link` | `{link_id: η}` per-link vector; set during `accuracy_model` sweeps, `null` during slot loop |
 | `slot_id` | Slot index; `null` during accuracy model sweeps |
 | `sub_experiment_name` | Sub-experiment that emitted this record |
+
+### `channel_estimate_quality`
+
+Emitted once per physical link on probe slots, for estimated-CSI adapters only (direct-CSI adapters use the true capacity and have no estimation error). Enables offline measurement of estimator bias, variance, and staleness — see [assumption3_validation.md](assumption3_validation.md).
+
+| Field | Description |
+|-------|-------------|
+| `from_node`, `to_node` | Link endpoints |
+| `slot_id` | Slot during which the probe was triggered |
+| `c_hat_bps` | Channel estimate the optimizer decided against (`F(t)`-measurable) |
+| `c_actual_bps` | Capacity realized this slot (same per-task-effective scale as the estimate) |
+| `absolute_error_bps` | \|c_hat − c_actual\| |
+| `relative_error` | \|c_hat − c_actual\| / c_actual (0 when c_actual = 0) |
+| `estimator_type` | Channel estimator class name |
+| `n_observations` | Observations folded into the estimator so far (small = warmup) |
 
 ---
 
@@ -728,10 +754,10 @@ tasks, tid_to_pid, pid_to_tid = build_inference_tasks(
 sub_exp = exp.sub_experiments[2]   # NoCsiSubExperiment
 adapter = build_adapter(sub_exp, tasks, tid_to_pid, pid_to_tid, global_order, exp, mu=1.0)
 
-# Single slot
+# Single slot — call step() BEFORE observe_capacity() to keep the estimate causal
 c_t = probe_dict_to_c_t_vector({"A-B": 1e8, "B-C": 1e8}, global_order)
-eta_per_pipeline_per_link, infeasible = adapter.step(t=0, c_t=c_t)
-adapter.observe_capacity(c_t)
+eta_per_pipeline_per_link, s_comp_per_node, infeasible = adapter.step(t=0, c_t=c_t)
+adapter.observe_capacity(c_t)   # fold this slot's probe in AFTER the step
 adapter.update_dual(t=0, actual_delays={0: 0.22, 1: 5.2})
 ```
 

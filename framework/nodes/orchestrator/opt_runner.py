@@ -39,6 +39,7 @@ import torch
 
 from framework.datamodels.api import MultiConfigUpdate
 from framework.datamodels.events import (
+    ChannelEstimateQualityEvent,
     OptSlotEvent,
     SubExperimentEvent,
     TaskAccuracyEvent,
@@ -1242,9 +1243,6 @@ class OptRunner:
                 if self._exp.workload.pattern == WorkloadPattern.FILL:
                     c_t = c_t / float(self._exp.workload.window_per_pipeline)
                 last_c_t = c_t
-                # Update the adapter's channel estimator with the real measurement.
-                # No-op for DirectCsiAdapter (no internal estimator).
-                adapter.observe_capacity(c_t)
             else:
                 # Non-probe slot for estimated adapters: reuse last probe value.
                 # adapter.step() ignores c_t for EstimatedAdapter (uses internal estimate).
@@ -1256,6 +1254,23 @@ class OptRunner:
                 slot_id, c_t
             )
             solve_time_ms = (time.perf_counter() - t_solve_start) * 1000.0
+            # Capture Assumption-3 diagnostics from this step BEFORE folding in
+            # the current probe: the estimate the decision used, the predicted
+            # bottleneck delays D̂_k, and the observation count / estimator name.
+            c_hat_used = adapter.get_current_estimate()
+            d_hat_per_task = adapter.get_last_predicted_delays()
+            n_obs_used = adapter.n_observations
+            estimator_type = adapter.estimator_type
+            # Fold this slot's probe into the channel estimator AFTER the primal
+            # step, so estimate(t) used only observations from slots < t.  This
+            # keeps c_hat(t) causal (F(t)-measurable), as the no-CSI / estimated-
+            # CSI algorithms require: Alg. 1 obtains c_hat(t) before the execute
+            # step, and Assumption 3 conditions the estimation error on the past.
+            # The fresh probe therefore informs the next slot's decision, not this
+            # one.  No-op for DirectCsiAdapter, which reads the current probe via
+            # c_t directly (correct for the CSI-aware setting, §3.2).
+            if should_probe:
+                adapter.observe_capacity(c_t)
             # Capture dual variables immediately after step(), before update_dual()
             # advances them — these are the λ values that drove this slot's decision.
             lambda_per_task = adapter.get_dual_variables()
@@ -1367,6 +1382,7 @@ class OptRunner:
                     d_excess_per_task=d_excess,
                     throughput_shortfall_per_pipeline=throughput_shortfall,
                     c_hat_per_link=probe_bps,
+                    d_hat_per_task=d_hat_per_task,
                     optimizer_type=sub_exp_name,
                     solve_time_ms=solve_time_ms,
                     sub_experiment_name=sub_exp_name,
@@ -1374,6 +1390,37 @@ class OptRunner:
                     compression_scheme=scheme,
                 )
             )
+
+            # Channel estimate quality (Assumption 3, channel level): the
+            # estimate the optimizer used vs the capacity realized this slot.
+            # Probe slots only, estimated adapters only (c_hat_used is None for
+            # direct-CSI, which reads the true capacity and has no estimation
+            # error).  c_t is the realization on the same per-task-effective
+            # scale as the estimate.
+            if should_probe and c_hat_used is not None:
+                for gi in range(len(global_order) - 1):
+                    if gi >= len(c_hat_used) or gi >= len(c_t):
+                        continue
+                    c_hat_bps = float(c_hat_used[gi])
+                    c_actual_bps = float(c_t[gi])
+                    abs_err = abs(c_hat_bps - c_actual_bps)
+                    self._emitter.emit(
+                        ChannelEstimateQualityEvent(
+                            experiment_id=self._exp.name,
+                            run_id=run_id,
+                            slot_id=slot_id,
+                            from_node=global_order[gi],
+                            to_node=global_order[gi + 1],
+                            c_hat_bps=c_hat_bps,
+                            c_actual_bps=c_actual_bps,
+                            absolute_error_bps=abs_err,
+                            relative_error=(
+                                abs_err / c_actual_bps if c_actual_bps != 0 else 0.0
+                            ),
+                            estimator_type=estimator_type,
+                            n_observations=n_obs_used,
+                        )
+                    )
 
             # --- 7. Dual update ---
             adapter.update_dual(slot_id, actual_delays)

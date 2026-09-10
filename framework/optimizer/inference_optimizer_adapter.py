@@ -633,6 +633,10 @@ class BaseOptimizerAdapter(ABC):
         self._global_order = global_order
         self._exp = exp
         self.probe_every_slot: bool = False
+        # Diagnostics captured each step() for Assumption 3 analysis.
+        self._last_estimate: np.ndarray | None = None
+        self._last_predicted_delays: dict[str, float] = {}
+        self._n_observations: int = 0
 
     @abstractmethod
     def step(
@@ -686,6 +690,90 @@ class BaseOptimizerAdapter(ABC):
             not maintain dual variables.
         """
         return {}
+
+    def get_current_estimate(self) -> np.ndarray | None:
+        """Return the channel estimate the last ``step()`` solved against.
+
+        ``None`` for direct-CSI adapters, which use the true capacity and thus
+        have no channel-estimation error to log.
+
+        Returns:
+            The estimate vector ``c_hat`` used in the most recent ``step()``,
+            or ``None``.
+        """
+        return self._last_estimate
+
+    def get_last_predicted_delays(self) -> dict[str, float]:
+        """Return the predicted bottleneck delay D̂_k per pipeline.
+
+        Populated each ``step()`` from the deployed config and the capacity the
+        optimizer solved against.  Pair with the realized delay 1/achieved_rps
+        to compute the estimation error Δ_k = D_act,k − D̂_k (Assumption 3).
+
+        Returns:
+            ``{pipeline_id: D̂_k in seconds}``; empty when the last slot was
+            infeasible.
+        """
+        return dict(self._last_predicted_delays)
+
+    @property
+    def n_observations(self) -> int:
+        """Number of capacity observations folded into the estimator so far."""
+        return self._n_observations
+
+    @property
+    def estimator_type(self) -> str:
+        """Channel estimator class name, or ``""`` for direct-CSI adapters."""
+        return ""
+
+    def _record_diagnostics(
+        self,
+        result: dict[int, dict[str, np.ndarray]] | None,
+        c_used: np.ndarray,
+        is_estimate: bool,
+    ) -> None:
+        """Store the estimate and predicted per-task delays for this slot.
+
+        The predicted delay mirrors the optimizer's bottleneck model
+        ``D̂_k = max over stages of (τ_i / s_comp_i, a_i η_i / (c_used_i · s_comm_i))``
+        (see ``no_csi.py``), evaluated on the deployed config and the capacity
+        the optimizer solved against.
+
+        Args:
+            result: Optimizer output, or ``None`` if infeasible.
+            c_used: Capacity vector the optimizer solved against (estimate for
+                estimated adapters, true ``c_t`` for direct-CSI).
+            is_estimate: True when ``c_used`` is an estimate; controls whether
+                ``get_current_estimate`` reports it.
+        """
+        self._last_estimate = np.array(c_used, copy=True) if is_estimate else None
+        if result is None:
+            self._last_predicted_delays = {}
+            return
+        delays: dict[str, float] = {}
+        for task in self._inference_tasks:
+            alloc = result.get(task.task_id)
+            pipeline_id = self._task_id_to_pipeline.get(task.task_id)
+            if alloc is None or pipeline_id is None:
+                continue
+            eta = np.asarray(alloc.get("eta", []), dtype=float)
+            s_comp = np.asarray(alloc.get("s_comp", np.ones(task.L_k)), dtype=float)
+            s_comm = np.asarray(
+                alloc.get("s_comm", np.ones(max(task.L_k - 1, 0))), dtype=float
+            )
+            stage_delays: list[float] = []
+            for idx, node in enumerate(range(task.b_k, task.e_k + 1)):
+                sc = float(s_comp[idx]) if idx < len(s_comp) else 1.0
+                stage_delays.append(task.tau[node] / max(sc, 1e-12))
+            for idx, link in enumerate(range(task.b_k, task.e_k)):
+                e = float(eta[idx]) if idx < len(eta) else 1.0
+                sm = float(s_comm[idx]) if idx < len(s_comm) else 1.0
+                c = float(c_used[link]) if link < len(c_used) else 1.0
+                stage_delays.append(
+                    (task.a[link] * e) / (max(c, 1e-12) * max(sm, 1e-12))
+                )
+            delays[pipeline_id] = float(max(stage_delays)) if stage_delays else 0.0
+        self._last_predicted_delays = delays
 
     def _extract(
         self, result: dict[int, dict[str, np.ndarray]] | None
@@ -779,6 +867,7 @@ class DirectCsiAdapter(BaseOptimizerAdapter):
             Tuple of (eta_per_pipeline_per_link, s_comp_per_node, infeasible).
         """
         result = self._optimizer.optimize(t, c_t)
+        self._record_diagnostics(result, c_t, is_estimate=False)
         return self._extract(result)
 
 
@@ -827,6 +916,12 @@ class EstimatedAdapter(BaseOptimizerAdapter):
             c_t: True link capacity vector.
         """
         self._estimator.update(c_t)
+        self._n_observations += 1
+
+    @property
+    def estimator_type(self) -> str:
+        """Class name of the wrapped external estimator."""
+        return type(self._estimator).__name__
 
     def step(
         self,
@@ -845,6 +940,7 @@ class EstimatedAdapter(BaseOptimizerAdapter):
         c_hat = self._estimator.estimate(t)
         result = self._optimizer.optimize(t, c_hat)
         self._slot = t
+        self._record_diagnostics(result, c_hat, is_estimate=True)
         return self._extract(result)
 
 

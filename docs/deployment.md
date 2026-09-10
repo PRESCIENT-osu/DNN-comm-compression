@@ -160,38 +160,193 @@ python -m framework.deploy \
   --apply
 ```
 
-## Kubernetes (KinD)
+## Kubernetes (k3s single-node) — end-to-end optimization experiment
 
-Generates a single `manifests.yaml` containing:
-- `ConfigMap` — experiment YAML mounted into node pods at `/app/config/experiment.yaml`
-- One `Pod` + `Service` per pipeline node
-- Metrics server `Pod` + `Service`
-- Orchestrator `Job`
+Complete runbook for running an **optimizer experiment** on a single-node k3s cluster on a GPU server (reference hardware: 8× NVIDIA L40S). Every command runs **on the server, from the repo root**, unless noted. The example uses the `opt_multi_resnet_lwiki` optspec with the `linear-3-opt/1Gbps` profile — substitute your own.
 
-**Per-link traffic shaping**: the same `TC_LINK_<N>_*` env var scheme as Docker is used. Node pod specs receive `securityContext.capabilities.add: [NET_ADMIN]` when any link has traffic shaping parameters. Node Services are **headless** (`clusterIP: None`) so DNS resolves directly to pod IPs — this is required because tc u32 filters match on the packet's destination IP, which in Kubernetes is the pod IP (after kube-proxy DNAT), not the ClusterIP.
+### What gets deployed
 
-**Orchestrator Job**: runs the sweep inside the cluster, connects to nodes and the metrics server via cluster DNS, and exits when complete. `CALLBACK_HOST` is injected from the pod's own IP via the Downward API so node pods can POST results back without a Service. Monitor with:
+`python -m framework.deploy --opt --target k8s` writes a single `manifests.yaml` (into `experiments/opt/<name>/deploy/`) containing:
+
+- One **Pod + headless Service** per pipeline node (`node-a/b/c`, Services `opt-a/opt-b/opt-c`), each running `framework.nodes.compute.multi.server`.
+- A **metrics** Pod + Service (`metrics:9100`).
+- An **orchestrator Job** running `framework.nodes.orchestrator.opt_runner /app/experiments/<name>`.
+
+Manifest properties (from `framework/deploy/k8s_backend.py`):
+
+- **Headless Services** (`clusterIP: None`) so DNS resolves to pod IPs — required because the per-link `tc u32` filters match the packet's destination pod IP, not a ClusterIP.
+- **Traffic shaping**: node pods receive `TC_LINK_<N>_*` env vars + `securityContext.capabilities.add: [NET_ADMIN]`; `entrypoint.sh` installs HTB + netem per link at startup.
+- **Callback**: the orchestrator's `CALLBACK_HOST` is set to its own pod IP via the Downward API; nodes POST results back to it directly (no Service needed).
+- **Config & data** are `hostPath` mounts, not ConfigMaps. On single-node k3s every hostPath resolves to the server's own filesystem, so there is no KinD-style `extraMounts` step — absolute host paths just work.
+
+### GPU usage
+
+With the `linear-3-opt` profile (`gpu: 1` per node) and the orchestrator's hardcoded request:
+
+| Pod | GPUs |
+|-----|------|
+| node-a / node-b / node-c | 1 each |
+| orchestrator (Stein oracle runs full ResNet + Llama on GPU) | 1 |
+| metrics | 0 |
+
+**Total: 4 GPUs**, leaving 4 of the 8 L40S free (e.g. for a second concurrent experiment). Each L40S (48 GB) comfortably holds a Llama-3.1-8B partition (~16 GB fp16) or the orchestrator's full-model simulations.
+
+### 0. Cluster & GPU prerequisites (one-time)
 
 ```bash
-kubectl logs -f job/<experiment-name>-orchestrator
+# NVIDIA driver already installed on the host (nvidia-smi lists 8× L40S).
+
+# Single-node k3s
+curl -sfL https://get.k3s.io | sh -
+export KUBECONFIG=/etc/rancher/k3s/k3s.yaml          # add to your shell profile
+
+# GPU support: expose nvidia.com/gpu to the scheduler. Recommended: install the
+# NVIDIA GPU Operator (sets up the container runtime, device plugin, and
+# RuntimeClass); or install nvidia-container-toolkit + the k8s-device-plugin
+# manually. Verify the node advertises 8 GPUs:
+kubectl get node -o jsonpath='{.items[0].status.capacity.nvidia\.com/gpu}{"\n"}'   # -> 8
 ```
 
-**Volumes**: partitions and the dataset are mounted as `hostPath` volumes — paths must be accessible on the kind cluster nodes. For paths outside `/tmp`, add `extraMounts` to the kind cluster config.
+> **`runtimeClassName` caveat.** The generated manifests do **not** set `runtimeClassName: nvidia`. This works when the NVIDIA runtime is the containerd default (the GPU Operator configures that). If your setup needs an explicit RuntimeClass, pods won't get GPUs until you either make `nvidia` the default runtime or patch `runtimeClassName: nvidia` into `manifests.yaml` after generating it — the deploy backend does not emit it.
 
-**NodePorts**: to expose the metrics server outside the cluster (e.g. to query it from your local machine), set `metrics_node_port` in `infra.yaml`. Node services do not need NodePorts since the orchestrator runs in-cluster.
+### 1. Repo & Python environment (one-time)
 
-**Applying**:
 ```bash
-python -m framework.deploy \
-  --experiment experiments/resnet56_equal-split_linear-3_100mbps \
+git clone <repo-url> dnn-comm-compression && cd dnn-comm-compression
+git submodule update --init --recursive              # pulls external/Inference_Optimizer
+make install-dev                                     # creates .venv, installs deps
+source .venv/bin/activate
+```
+
+### 2. Prepare models and datasets on the host (one-time)
+
+Everything lands under the repo root and is `hostPath`-mounted into the pods.
+
+```bash
+# Model partitions (loaded by the node pods)
+python models/resnet/partition_resnet56.py --verify
+#   -> models/resnet/.partitions/{p1..p5}.pt
+
+huggingface-cli login                                # Llama-3.1-8B is gated
+python models/llama/partition_llama.py \
+  --model meta-llama/Llama-3.1-8B \
+  --output-dir models/llama/.partitions \
+  --dtype fp16
+#   -> models/llama/.partitions/{p1,p2,p3}.pt and models/llama/.partitions/tokenizer/
+
+# Full models for the Stein simulation oracle (the `simulation_path` in the optspec).
+#   ResNet checkpoint already ships in the repo: models/resnet/resnet56-4bfd9763.th
+huggingface-cli download meta-llama/Llama-3.1-8B --local-dir models/llama/llama-3.1-8b
+#   -> models/llama/llama-3.1-8b/  (loaded by SimulatedLlamaPipeline)
+
+# Datasets (.datasets is mounted read-write, so downloads persist to the host)
+mkdir -p .datasets
+python -c "import torchvision; torchvision.datasets.CIFAR10('.datasets/cifar10', train=False, download=True)"
+#   -> .datasets/cifar10
+#   WikiText-2 (and MMLU for other optspecs) are pulled from HuggingFace at runtime.
+```
+
+> The image sets `HF_HOME=/hf_cache` but the manifest does **not** mount it, so HuggingFace `datasets` downloads (WikiText-2 / MMLU) happen inside the orchestrator pod on each run and require network egress. Pre-seed the datasets or an HF cache if the pod is offline. Known gap.
+
+### 3. Build and import images
+
+Optimizer runs use three images: `dnn-compute-multi` (nodes), `dnn-metrics`, `dnn-orchestrator`.
+
+```bash
+make build-multi build-metrics build-orchestrator    # or `make build` for all five
+
+# Import into k3s containerd. Pods use imagePullPolicy: Never and there is no
+# registry, so the images must live in k3s's k8s.io containerd namespace, which
+# `k3s ctr images import` targets by default.
+for img in dnn-compute-multi:latest dnn-metrics:latest dnn-orchestrator:latest; do
+  docker save "$img" | sudo k3s ctr images import -
+done
+sudo k3s ctr images ls | grep dnn-                   # verify all three imported
+```
+
+> **Re-import after every rebuild.** Because the pull policy is `Never`, rebuilding an image does not update the cluster until you re-run the import — otherwise pods silently run stale code.
+
+### 4. Generate the experiment
+
+```bash
+python tools/generate.py --opt \
+  --spec optspecs/opt_multi_resnet_lwiki \
+  --profile profiles/linear-3-opt/1Gbps.yaml
+#   -> experiments/opt/opt_multi_resnet_lwiki_linear-3-opt_1Gbps/{experiment.yaml, infra.yaml}
+```
+
+### 5. Deploy to the cluster
+
+Run from the repo root so the relative host paths (`models`, `.datasets`, `artifacts`, `metrics_data`) resolve to `<repo>/...` on the server — the generator bakes absolute, resolved paths into the manifest.
+
+```bash
+kubectl create namespace dnn        # once
+
+python -m framework.deploy --opt \
+  --experiment experiments/opt/opt_multi_resnet_lwiki_linear-3-opt_1Gbps \
   --target k8s \
-  --partitions-dir /path/on/server/to/partitions \
-  --dataset-dir /path/on/server/to/datasets/cifar10 \
+  --image dnn-compute-multi:latest \
+  --partitions-dir models \
+  --dataset-dir .datasets \
+  --artifacts-dir artifacts \
+  --metrics-dir metrics_data \
+  --namespace dnn \
   --apply
-
-# Or manually
-kubectl apply -f experiments/resnet56_equal-split_linear-3_100mbps/deploy/manifests.yaml
 ```
+
+`--apply` runs `kubectl apply -f manifests.yaml -n dnn`. To inspect first, omit it and apply manually:
+
+```bash
+kubectl apply -f experiments/opt/opt_multi_resnet_lwiki_linear-3-opt_1Gbps/deploy/manifests.yaml -n dnn
+```
+
+Flag notes (verified against `framework/deploy/__main__.py`): `--image` **must** be overridden to `dnn-compute-multi:latest` (default is `dnn-compression:latest`); `--partitions-dir models` is the base holding `resnet/.partitions` and `llama/.partitions`; `--dataset-dir .datasets` is the base of all dataset subdirs; `--artifacts-dir` (writable) holds profiling / estimator / accuracy-model outputs.
+
+### 6. Monitor
+
+```bash
+kubectl get pods -n dnn -w
+kubectl get jobs -n dnn
+
+# Orchestrator log stream. Job name = experiment name, lowercased, '_' -> '-':
+kubectl logs -f job/opt-multi-resnet-lwiki-linear-3-opt-1gbps-orchestrator -n dnn
+```
+
+The orchestrator waits for all node pods to report healthy, then runs the sub-experiments sequentially (profiling → accuracy models → optimizer / baseline slot loops) and the Job exits `Completed`.
+
+### 7. Collect results
+
+The metrics server writes NDJSON to its `hostPath` mount, i.e. directly on the server:
+
+```
+metrics_data/            # <repo>/metrics_data on the host — per-experiment NDJSON event stream
+artifacts/               # profiling results, estimator state, accuracy-model pickles
+```
+
+To query the metrics HTTP API instead of reading files:
+
+```bash
+kubectl port-forward -n dnn svc/metrics 9100:9100
+curl 'http://localhost:9100/metrics/query?event_type=opt_slot&experiment_id=opt_multi_resnet_lwiki_linear-3-opt_1Gbps'
+```
+
+(Alternatively set `metrics_node_port` in the profile / `infra.yaml` before generating to expose the metrics Service as a NodePort.)
+
+For the Assumption-3 estimation-error analysis (`Δ_k`, `δ`, `δ⁺` from `opt_slot.d_hat_per_task`, `throughput_constraint`, and `channel_estimate_quality`), see [assumption3_validation.md](assumption3_validation.md); the opt-specific plotting pass is not yet implemented.
+
+### 8. Teardown
+
+```bash
+kubectl delete -f experiments/opt/opt_multi_resnet_lwiki_linear-3-opt_1Gbps/deploy/manifests.yaml -n dnn
+# results in metrics_data/ and artifacts/ persist on the host
+```
+
+### Known gaps / caveats
+
+- **`runtimeClassName: nvidia` is not emitted** — see the GPU prerequisites note.
+- **No HF cache mount** — WikiText-2 / MMLU download inside the orchestrator pod each run unless pre-seeded on the host.
+- **Re-import images after every rebuild** (`imagePullPolicy: Never`).
+- **Redeploy after code changes** — runner/adapter changes need only a re-imported `dnn-orchestrator` image and a re-applied Job; node-side changes need `dnn-compute-multi` rebuilt and re-imported.
 
 ## Infra Config Inheritance
 

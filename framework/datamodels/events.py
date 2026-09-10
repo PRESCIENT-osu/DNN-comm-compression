@@ -279,7 +279,11 @@ class OptSlotEvent(BaseEvent):
     ]  # pipeline_id → max(0, target_rps - achieved_rps) in tasks/second
     c_hat_per_link: dict[
         str, float
-    ]  # link_id → channel estimate at decision time (bps)
+    ]  # link_id → realized capacity probed this slot (bps); the estimate the
+    # optimizer used is in ChannelEstimateQualityEvent.c_hat_bps
+    d_hat_per_task: dict[str, float] = {}
+    # pipeline_id → predicted bottleneck delay D̂_k (seconds) at decision time;
+    # pair with realized 1/achieved_rps (D_act) for Δ_k = D_act − D̂_k (Assumption 3)
     optimizer_type: str
     solve_time_ms: float  # wall time for optimizer.step()
     infeasible: bool = (
